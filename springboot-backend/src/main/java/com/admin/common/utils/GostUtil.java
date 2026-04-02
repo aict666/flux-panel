@@ -42,7 +42,17 @@ public class GostUtil {
     }
 
     public static GostDto AddChains(Long node_id, List<ChainTunnel> chainTunnels, Map<Long, Node> node_s) {
+        JSONObject data = createChainData(node_id, chainTunnels, node_s);
+        GostDto gostDto = WebSocketServer.send_msg(node_id, data, "AddChains");
+        if (gostDto.getMsg().contains("exists")){
+            gostDto.setMsg("OK");
+        }
+        return gostDto;
+    }
+
+    static JSONObject createChainData(Long nodeId, List<ChainTunnel> chainTunnels, Map<Long, Node> node_s) {
         JSONArray nodes = new JSONArray();
+        int nodePosition = 1;
         for (ChainTunnel chainTunnel : chainTunnels) {
             JSONObject dialer = new JSONObject();
             dialer.put("type", chainTunnel.getProtocol());
@@ -52,21 +62,19 @@ public class GostUtil {
 
             Node node_info = node_s.get(chainTunnel.getNodeId());
             JSONObject node = new JSONObject();
-            node.put("name", "node_" + chainTunnel.getInx());
+            node.put("name", buildChainNodeName(chainTunnel, nodePosition));
             node.put("addr", processServerAddress(node_info.getServerIp() + ":" + chainTunnel.getPort()));
             node.put("connector", connector);
             node.put("dialer", dialer);
-
-
-
             nodes.add(node);
+            nodePosition++;
         }
         JSONObject hop = new JSONObject();
         hop.put("name", "hop_" + chainTunnels.getFirst().getTunnelId());
 
         // interface设置在转发链
-        if (StringUtils.isNotBlank(node_s.get(node_id).getInterfaceName())) {
-            hop.put("interface", node_s.get(node_id).getInterfaceName());
+        if (StringUtils.isNotBlank(node_s.get(nodeId).getInterfaceName())) {
+            hop.put("interface", node_s.get(nodeId).getInterfaceName());
         }
 
 
@@ -85,12 +93,17 @@ public class GostUtil {
         JSONObject data = new JSONObject();
         data.put("name", "chains_" + chainTunnels.getFirst().getTunnelId());
         data.put("hops", hops);
+        return data;
+    }
 
-        GostDto gostDto = WebSocketServer.send_msg(node_id, data, "AddChains");
-        if (gostDto.getMsg().contains("exists")){
-            gostDto.setMsg("OK");
+    static String buildChainNodeName(ChainTunnel chainTunnel, int nodePosition) {
+        if (chainTunnel.getInx() != null && chainTunnel.getNodeId() != null) {
+            return "node_" + chainTunnel.getInx() + "_" + chainTunnel.getNodeId();
         }
-        return gostDto;
+        if (chainTunnel.getNodeId() != null) {
+            return "node_" + chainTunnel.getNodeId();
+        }
+        return "node_" + nodePosition;
     }
 
     public static GostDto DeleteChains(Long node_id, String name) {
