@@ -189,19 +189,14 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             GostDto gostDto = GostUtil.AddAndUpdateService(serviceName, limiter, node, forward, forwardPort, tunnel, "AddService");
             if (Objects.equals(gostDto.getMsg(), "OK")) {
                 JSONObject data = new JSONObject();
-                data.put("node_id", node.getId());
-                data.put("name", serviceName);
+                data.put("nodeId", node.getId());
+                data.put("serviceName", serviceName);
                 success.add(data);
             } else {
                 this.removeById(forward.getId());
                 forwardPortService.remove(new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId()));
-                for (JSONObject jsonObject : success) {
-                    JSONArray se = new JSONArray();
-                    se.add(jsonObject.getString("name") + "_tcp");
-                    se.add(jsonObject.getString("name") + "_udp");
-                    GostUtil.DeleteService(jsonObject.getLong("node_id"), se);
-                    return R.err(gostDto.getMsg());
-                }
+                cleanupCreatedForwardServices(success);
+                return R.err(gostDto.getMsg());
             }
 
         }
@@ -1120,9 +1115,11 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
             throw new RuntimeException("节点不存在");
         }
 
+        List<Long> colocatedNodeIds = resolveCoLocatedNodeIds(node);
+
         // 1. 查询隧道转发链占用的端口
         List<ChainTunnel> chainTunnels = chainTunnelService.list(
-                new QueryWrapper<ChainTunnel>().eq("node_id", nodeId)
+                new QueryWrapper<ChainTunnel>().in("node_id", colocatedNodeIds)
         );
         Set<Integer> usedPorts = chainTunnels.stream()
                 .map(ChainTunnel::getPort)
@@ -1130,7 +1127,9 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
                 .collect(Collectors.toSet());
 
 
-        List<ForwardPort> list = forwardPortService.list(new QueryWrapper<ForwardPort>().eq("node_id", nodeId).ne("forward_id", forward_id));
+        List<ForwardPort> list = forwardPortService.list(
+                new QueryWrapper<ForwardPort>().in("node_id", colocatedNodeIds).ne("forward_id", forward_id)
+        );
         Set<Integer> forwardUsedPorts = new HashSet<>();
         for (ForwardPort forwardPort : list) {
             forwardUsedPorts.add(forwardPort.getPort());
@@ -1141,6 +1140,18 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         return parsedPorts.stream()
                 .filter(p -> !usedPorts.contains(p))
                 .toList();
+    }
+
+    private List<Long> resolveCoLocatedNodeIds(Node node) {
+        if (node.getServerIp() == null || node.getServerIp().isBlank()) {
+            return List.of(node.getId());
+        }
+        List<Long> ids = nodeService.list(new QueryWrapper<Node>().eq("server_ip", node.getServerIp())).stream()
+                .map(Node::getId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        return ids.isEmpty() ? List.of(node.getId()) : ids;
     }
 
 

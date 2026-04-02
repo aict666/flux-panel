@@ -435,7 +435,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
         Set<Long> impactedTunnelIds = topologySupport.collectImpactedTunnelIds(changedTunnelId, topologyMap);
         List<Long> rebuildOrder = topologySupport.sortImpactedTunnelIds(impactedTunnelIds, topologyMap);
 
-        Map<Long, Set<Integer>> usedPortsByNode = buildUsedPortsByNode(impactedTunnelIds, allCompiledTopology);
+        Map<String, Set<Integer>> usedPortsByScope = buildUsedPortsByScope(impactedTunnelIds, allCompiledTopology);
         List<CompiledTunnelPlan> compiledPlans = new ArrayList<>();
         for (Long tunnelId : rebuildOrder) {
             Tunnel tunnel = tunnelMap.get(tunnelId);
@@ -443,7 +443,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                 throw new IllegalArgumentException("隧道不存在: " + tunnelId);
             }
             TunnelTopologyConfigDto rawTopology = topologyMap.getOrDefault(tunnelId, new TunnelTopologyConfigDto());
-            compiledPlans.add(compileTunnelPlan(tunnel, rawTopology, tunnelMap, topologyMap, usedPortsByNode));
+            compiledPlans.add(compileTunnelPlan(tunnel, rawTopology, tunnelMap, topologyMap, usedPortsByScope));
         }
 
         Map<Long, List<ChainTunnel>> previousCompiledTopology = compiledTopologyMap.entrySet().stream()
@@ -478,7 +478,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                                                  TunnelTopologyConfigDto rawTopology,
                                                  Map<Long, Tunnel> tunnelMap,
                                                  Map<Long, TunnelTopologyConfigDto> topologyMap,
-                                                 Map<Long, Set<Integer>> usedPortsByNode) {
+                                                 Map<String, Set<Integer>> usedPortsByScope) {
         TunnelTopologySupport.ExpandedTopology expanded = topologySupport.expand(
                 tunnel.getId(),
                 tunnel.getType(),
@@ -500,7 +500,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
 
         Map<Long, Node> nodeMap = loadAndValidateNodes(expanded);
         String resolvedInIp = resolveInIp(tunnel.getInIp(), expanded.getInNodes(), nodeMap);
-        List<ChainTunnel> compiled = buildCompiledChainTunnels(tunnel.getId(), tunnel.getType(), expanded, nodeMap, usedPortsByNode);
+        List<ChainTunnel> compiled = buildCompiledChainTunnels(tunnel.getId(), tunnel.getType(), expanded, nodeMap, usedPortsByScope);
         return new CompiledTunnelPlan(tunnel, expanded, nodeMap, compiled, resolvedInIp);
     }
 
@@ -508,7 +508,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                                                         Integer tunnelType,
                                                         TunnelTopologySupport.ExpandedTopology expanded,
                                                         Map<Long, Node> nodeMap,
-                                                        Map<Long, Set<Integer>> usedPortsByNode) {
+                                                        Map<String, Set<Integer>> usedPortsByScope) {
         List<ChainTunnel> compiled = new ArrayList<>();
         for (TunnelTopologyItemDto inNode : expanded.getInNodes()) {
             ChainTunnel chainTunnel = new ChainTunnel();
@@ -526,7 +526,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                 chainTunnel.setTunnelId(tunnelId);
                 chainTunnel.setChainType(2);
                 chainTunnel.setNodeId(item.getNodeId());
-                chainTunnel.setPort(allocatePort(item.getNodeId(), nodeMap, usedPortsByNode));
+                chainTunnel.setPort(allocatePort(item.getNodeId(), nodeMap, usedPortsByScope));
                 chainTunnel.setStrategy(hopStrategy);
                 chainTunnel.setProtocol(normalizeProtocol(item.getProtocol()));
                 chainTunnel.setInx(hopIndex);
@@ -542,7 +542,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
                 chainTunnel.setTunnelId(tunnelId);
                 chainTunnel.setChainType(3);
                 chainTunnel.setNodeId(outNode.getNodeId());
-                chainTunnel.setPort(allocatePort(outNode.getNodeId(), nodeMap, usedPortsByNode));
+                chainTunnel.setPort(allocatePort(outNode.getNodeId(), nodeMap, usedPortsByScope));
                 chainTunnel.setStrategy(outStrategy);
                 chainTunnel.setProtocol(normalizeProtocol(outNode.getProtocol()));
                 compiled.add(chainTunnel);
@@ -551,35 +551,48 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
         return compiled;
     }
 
-    private Map<Long, Set<Integer>> buildUsedPortsByNode(Set<Long> impactedTunnelIds, List<ChainTunnel> allCompiledTopology) {
-        Map<Long, Set<Integer>> usedPortsByNode = new HashMap<>();
+    private Map<String, Set<Integer>> buildUsedPortsByScope(Set<Long> impactedTunnelIds, List<ChainTunnel> allCompiledTopology) {
+        Map<Long, String> portScopeByNodeId = nodeService.list().stream()
+                .filter(node -> node.getId() != null)
+                .collect(Collectors.toMap(Node::getId, this::resolvePortScopeKey));
+        Map<String, Set<Integer>> usedPortsByScope = new HashMap<>();
 
         for (ChainTunnel chainTunnel : allCompiledTopology) {
             if (!impactedTunnelIds.contains(chainTunnel.getTunnelId()) && chainTunnel.getPort() != null) {
-                usedPortsByNode.computeIfAbsent(chainTunnel.getNodeId(), key -> new LinkedHashSet<>()).add(chainTunnel.getPort());
+                String scopeKey = portScopeByNodeId.getOrDefault(chainTunnel.getNodeId(), "node:" + chainTunnel.getNodeId());
+                usedPortsByScope.computeIfAbsent(scopeKey, key -> new LinkedHashSet<>()).add(chainTunnel.getPort());
             }
         }
 
         List<ForwardPort> forwardPorts = forwardPortService.list();
         for (ForwardPort forwardPort : forwardPorts) {
             if (forwardPort.getPort() != null) {
-                usedPortsByNode.computeIfAbsent(forwardPort.getNodeId(), key -> new LinkedHashSet<>()).add(forwardPort.getPort());
+                String scopeKey = portScopeByNodeId.getOrDefault(forwardPort.getNodeId(), "node:" + forwardPort.getNodeId());
+                usedPortsByScope.computeIfAbsent(scopeKey, key -> new LinkedHashSet<>()).add(forwardPort.getPort());
             }
         }
-        return usedPortsByNode;
+        return usedPortsByScope;
     }
 
-    private Integer allocatePort(Long nodeId, Map<Long, Node> nodeMap, Map<Long, Set<Integer>> usedPortsByNode) {
+    private Integer allocatePort(Long nodeId, Map<Long, Node> nodeMap, Map<String, Set<Integer>> usedPortsByScope) {
         Node node = nodeMap.get(nodeId);
         if (node == null) {
             throw new IllegalArgumentException("节点不存在");
         }
-        Set<Integer> usedPorts = usedPortsByNode.computeIfAbsent(nodeId, key -> new LinkedHashSet<>());
+        String scopeKey = resolvePortScopeKey(node);
+        Set<Integer> usedPorts = usedPortsByScope.computeIfAbsent(scopeKey, key -> new LinkedHashSet<>());
         List<Integer> parsedPorts = parsePorts(node.getPort());
         Integer availablePort = parsedPorts.stream().filter(port -> !usedPorts.contains(port)).findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("节点端口已满，无可用端口"));
         usedPorts.add(availablePort);
         return availablePort;
+    }
+
+    private String resolvePortScopeKey(Node node) {
+        if (node.getServerIp() == null || node.getServerIp().isBlank()) {
+            return "node:" + node.getId();
+        }
+        return "host:" + node.getServerIp().trim();
     }
 
     private Map<Long, Node> loadAndValidateNodes(TunnelTopologySupport.ExpandedTopology expanded) {
