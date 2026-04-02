@@ -1,6 +1,5 @@
 package com.admin.common.dto;
 
-import com.admin.entity.ChainTunnel;
 import lombok.Data;
 
 import java.math.BigDecimal;
@@ -32,12 +31,11 @@ public class TunnelDetailDto {
     private String inIp;
     
     // 入口节点列表
-    private List<ChainTunnel> inNodeId = new ArrayList<>();
-    
-    // 转发链节点列表（二维数组结构）
-    private List<List<ChainTunnel>> chainNodes = new ArrayList<>();
-    
-    // 出口节点列表
-    private List<ChainTunnel> outNodeId = new ArrayList<>();
-}
+    private List<TunnelTopologyItemDto> inNodeId = new ArrayList<>();
 
+    // 转发链节点列表（二维数组结构）
+    private List<List<TunnelTopologyItemDto>> chainNodes = new ArrayList<>();
+
+    // 出口节点列表
+    private List<TunnelTopologyItemDto> outNodeId = new ArrayList<>();
+}

@@ -3,10 +3,11 @@ package com.admin.service;
 import com.admin.common.dto.ForwardDto;
 import com.admin.common.dto.ForwardUpdateDto;
 import com.admin.common.lang.R;
+import com.admin.entity.ChainTunnel;
 import com.admin.entity.Forward;
 import com.baomidou.mybatisplus.extension.service.IService;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * <p>
@@ -80,4 +81,11 @@ public interface ForwardService extends IService<Forward> {
      * @return 更新结果
      */
     R updateForwardOrder(Map<String, Object> params);
+
+    /**
+     * 隧道运行拓扑变更后，重建该隧道下已有转发的入口服务和端口分配
+     * @param tunnelId 隧道ID
+     * @param previousCompiledTopology 旧的编译态拓扑
+     */
+    void rebuildForTunnel(Long tunnelId, List<ChainTunnel> previousCompiledTopology);
 }

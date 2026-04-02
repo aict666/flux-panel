@@ -1,15 +1,11 @@
 package com.admin.entity;
 
-import java.io.Serializable;
-import java.math.BigDecimal;
-import java.util.List;
-
-import com.admin.common.dto.ChainNodesItems;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableName;
-import com.baomidou.mybatisplus.extension.handlers.JacksonTypeHandler;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
+
+import java.math.BigDecimal;
 
 /**
  * <p>
@@ -35,4 +31,7 @@ public class Tunnel extends BaseEntity {
     private BigDecimal trafficRatio;
 
     private String inIp;
+
+    @TableField("topology_json")
+    private String topologyJson;
 }

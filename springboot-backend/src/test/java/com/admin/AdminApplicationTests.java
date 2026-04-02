@@ -19,7 +19,11 @@ import java.util.Date;
 import java.util.List;
 
 
-@SpringBootTest
+@SpringBootTest(properties = {
+        "DB_PATH=target/test-gost.db",
+        "LOG_DIR=target/test-logs",
+        "JWT_SECRET=test-secret"
+})
 class AdminApplicationTests {
 
 
