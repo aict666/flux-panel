@@ -98,7 +98,7 @@ public class UserTunnelServiceImpl extends ServiceImpl<UserTunnelMapper, UserTun
                 forwardService.updateForward(forwardUpdateDto);
             }
         }
-        return R.err("用户隧道权限更新失败");
+        return R.ok();
     }
 
     private <T> void updateOptionalProperty(java.util.function.Consumer<T> setter, T value) {
