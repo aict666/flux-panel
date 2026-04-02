@@ -21,9 +21,12 @@ import javax.annotation.Resource;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * <p>
@@ -137,6 +140,44 @@ public class SpeedLimitServiceImpl extends ServiceImpl<SpeedLimitMapper, SpeedLi
         }
         this.removeById(id);
         return R.ok();
+    }
+
+    @Override
+    public void rebuildForTunnel(Long tunnelId, List<ChainTunnel> previousCompiledTopology) {
+        List<SpeedLimit> speedLimits = this.list(new QueryWrapper<SpeedLimit>().eq("tunnel_id", tunnelId));
+        if (speedLimits.isEmpty()) {
+            return;
+        }
+
+        Set<Long> previousNodeIds = previousCompiledTopology.stream()
+                .map(ChainTunnel::getNodeId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+        Set<Long> currentNodeIds = chainTunnelService.list(new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnelId)).stream()
+                .map(ChainTunnel::getNodeId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        for (SpeedLimit speedLimit : speedLimits) {
+            String speedInMBps = convertBitsToMBps(speedLimit.getSpeed());
+
+            for (Long nodeId : previousNodeIds) {
+                Node node = nodeService.getById(nodeId);
+                if (node != null) {
+                    GostUtil.DeleteLimiters(node.getId(), speedLimit.getId());
+                }
+            }
+
+            for (Long nodeId : currentNodeIds) {
+                Node node = nodeService.getById(nodeId);
+                if (node != null) {
+                    GostDto gostDto = GostUtil.AddLimiters(node.getId(), speedLimit.getId(), speedInMBps);
+                    if (!Objects.equals(gostDto.getMsg(), "OK")) {
+                        throw new IllegalArgumentException(gostDto.getMsg());
+                    }
+                }
+            }
+        }
     }
 
     private String convertBitsToMBps(Integer speedInBits) {

@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS tunnel (
   created_time INTEGER NOT NULL,
   updated_time INTEGER NOT NULL,
   status INTEGER NOT NULL,
-  in_ip TEXT
+  in_ip TEXT,
+  topology_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS chain_tunnel (

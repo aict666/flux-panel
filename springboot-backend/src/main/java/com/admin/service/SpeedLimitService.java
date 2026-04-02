@@ -3,8 +3,11 @@ package com.admin.service;
 import com.admin.common.dto.SpeedLimitDto;
 import com.admin.common.dto.SpeedLimitUpdateDto;
 import com.admin.common.lang.R;
+import com.admin.entity.ChainTunnel;
 import com.admin.entity.SpeedLimit;
 import com.baomidou.mybatisplus.extension.service.IService;
+
+import java.util.List;
 
 /**
  * <p>
@@ -42,4 +45,11 @@ public interface SpeedLimitService extends IService<SpeedLimit> {
      * @return 结果
      */
     R deleteSpeedLimit(Long id);
+
+    /**
+     * 隧道运行拓扑变更后，重建该隧道相关节点上的 limiter
+     * @param tunnelId 隧道ID
+     * @param previousCompiledTopology 旧的编译态拓扑
+     */
+    void rebuildForTunnel(Long tunnelId, List<ChainTunnel> previousCompiledTopology);
 }

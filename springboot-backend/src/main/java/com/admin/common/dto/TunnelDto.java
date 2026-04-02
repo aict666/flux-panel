@@ -1,12 +1,14 @@
 package com.admin.common.dto;
 
-import com.admin.entity.ChainTunnel;
 import lombok.Data;
+
+import javax.validation.Valid;
+import javax.validation.constraints.DecimalMax;
+import javax.validation.constraints.DecimalMin;
 import javax.validation.constraints.NotBlank;
 import javax.validation.constraints.NotNull;
-import javax.validation.constraints.DecimalMin;
-import javax.validation.constraints.DecimalMax;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 
 @Data
@@ -16,11 +18,14 @@ public class TunnelDto {
     private String name;
 
     @NotNull(message = "入口节点不能为空")
-    private List<ChainTunnel> inNodeId;
+    @Valid
+    private List<TunnelTopologyItemDto> inNodeId = new ArrayList<>();
 
-    private List<List<ChainTunnel>> chainNodes;
+    @Valid
+    private List<List<TunnelTopologyItemDto>> chainNodes = new ArrayList<>();
 
-    private List<ChainTunnel> outNodeId;
+    @Valid
+    private List<TunnelTopologyItemDto> outNodeId = new ArrayList<>();
 
     private String inIp;
 
@@ -33,4 +38,4 @@ public class TunnelDto {
     @DecimalMin(value = "0.0", inclusive = false, message = "流量倍率必须大于0.0")
     @DecimalMax(value = "100.0", message = "流量倍率不能大于100.0")
     private BigDecimal trafficRatio;
-} 
+}

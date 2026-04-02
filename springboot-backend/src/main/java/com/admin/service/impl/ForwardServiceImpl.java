@@ -278,6 +278,72 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     }
 
     @Override
+    public void rebuildForTunnel(Long tunnelId, List<ChainTunnel> previousCompiledTopology) {
+        Tunnel tunnel = tunnelService.getById(tunnelId);
+        if (tunnel == null) {
+            return;
+        }
+
+        List<Forward> forwards = this.list(new QueryWrapper<Forward>().eq("tunnel_id", tunnelId));
+        if (forwards.isEmpty()) {
+            return;
+        }
+
+        List<ChainTunnel> previousEntryNodes = previousCompiledTopology.stream()
+                .filter(chainTunnel -> Objects.equals(chainTunnel.getChainType(), 1))
+                .collect(Collectors.toList());
+        List<ChainTunnel> currentEntryNodes = chainTunnelService.list(
+                new QueryWrapper<ChainTunnel>().eq("tunnel_id", tunnelId).eq("chain_type", 1)
+        );
+
+        for (Forward forward : forwards) {
+            Integer preferredPort = extractPreferredPort(forward.getId());
+            UserTunnel userTunnel = getUserTunnel(forward.getUserId(), tunnel.getId().intValue());
+            String serviceName = buildServiceName(forward.getId(), forward.getUserId(), userTunnel);
+
+            deleteForwardServices(previousEntryNodes, serviceName);
+            forwardPortService.remove(new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId()));
+
+            if (currentEntryNodes.isEmpty()) {
+                continue;
+            }
+
+            List<ChainTunnel> rebuiltEntries = get_port(cloneChainTunnels(currentEntryNodes), preferredPort, forward.getId());
+            List<JSONObject> createdServices = new ArrayList<>();
+            try {
+                for (ChainTunnel chainTunnel : rebuiltEntries) {
+                    ForwardPort forwardPort = new ForwardPort();
+                    forwardPort.setForwardId(forward.getId());
+                    forwardPort.setNodeId(chainTunnel.getNodeId());
+                    forwardPort.setPort(chainTunnel.getPort());
+                    forwardPortService.save(forwardPort);
+
+                    if (Objects.equals(forward.getStatus(), 1)) {
+                        Node node = nodeService.getById(chainTunnel.getNodeId());
+                        if (node == null) {
+                            throw new IllegalArgumentException("部分节点不存在");
+                        }
+                        Integer limiter = userTunnel != null ? userTunnel.getSpeedId() : null;
+                        GostDto gostDto = GostUtil.AddAndUpdateService(serviceName, limiter, node, forward, forwardPort, tunnel, "AddService");
+                        if (!Objects.equals(gostDto.getMsg(), "OK")) {
+                            throw new IllegalArgumentException(gostDto.getMsg());
+                        }
+
+                        JSONObject created = new JSONObject();
+                        created.put("nodeId", node.getId());
+                        created.put("serviceName", serviceName);
+                        createdServices.add(created);
+                    }
+                }
+            } catch (Exception e) {
+                cleanupCreatedForwardServices(createdServices);
+                forwardPortService.remove(new QueryWrapper<ForwardPort>().eq("forward_id", forward.getId()));
+                throw e;
+            }
+        }
+    }
+
+    @Override
     public R deleteForward(Long id) {
 
         // 1. 获取当前用户信息
@@ -942,6 +1008,53 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     private String buildServiceName(Long forwardId, Integer userId, UserTunnel userTunnel) {
         int userTunnelId = (userTunnel != null) ? userTunnel.getId() : 0;
         return forwardId + "_" + userId + "_" + userTunnelId;
+    }
+
+    private Integer extractPreferredPort(Long forwardId) {
+        List<ForwardPort> ports = forwardPortService.list(new QueryWrapper<ForwardPort>().eq("forward_id", forwardId));
+        if (ports.isEmpty()) {
+            return null;
+        }
+        return ports.stream()
+                .map(ForwardPort::getPort)
+                .filter(Objects::nonNull)
+                .sorted()
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void deleteForwardServices(List<ChainTunnel> entryNodes, String serviceName) {
+        for (ChainTunnel entryNode : entryNodes) {
+            JSONArray services = new JSONArray();
+            services.add(serviceName + "_tcp");
+            services.add(serviceName + "_udp");
+            GostUtil.DeleteService(entryNode.getNodeId(), services);
+        }
+    }
+
+    private List<ChainTunnel> cloneChainTunnels(List<ChainTunnel> source) {
+        List<ChainTunnel> cloned = new ArrayList<>();
+        for (ChainTunnel item : source) {
+            ChainTunnel copied = new ChainTunnel();
+            copied.setTunnelId(item.getTunnelId());
+            copied.setChainType(item.getChainType());
+            copied.setNodeId(item.getNodeId());
+            copied.setPort(item.getPort());
+            copied.setStrategy(item.getStrategy());
+            copied.setInx(item.getInx());
+            copied.setProtocol(item.getProtocol());
+            cloned.add(copied);
+        }
+        return cloned;
+    }
+
+    private void cleanupCreatedForwardServices(List<JSONObject> createdServices) {
+        for (JSONObject created : createdServices) {
+            JSONArray services = new JSONArray();
+            services.add(created.getString("serviceName") + "_tcp");
+            services.add(created.getString("serviceName") + "_udp");
+            GostUtil.DeleteService(created.getLong("nodeId"), services);
+        }
     }
 
 
