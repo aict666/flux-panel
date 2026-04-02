@@ -27,7 +27,7 @@ class NodeServiceInstallCommandTest {
 
         NodeInstallCommandDto dto = assertInstanceOf(NodeInstallCommandDto.class, result.getData());
         assertEquals("agent_a", dto.getServiceName());
-        assertTrue(dto.getInstallCommand().contains("https://github.com/aict666/flux-panel/releases/download/2.0.7-beta/install.sh"));
+        assertTrue(dto.getInstallCommand().contains("https://github.com/aict666/flux-panel/releases/latest/download/install.sh"));
         assertTrue(dto.getInstallCommand().contains("./install.sh -n agent_a -a panel.example.com:6365 -s secret-a"));
         assertTrue(dto.getUpdateCommand().contains("./install.sh --update -n agent_a"));
         assertTrue(dto.getUninstallCommand().contains("./install.sh --uninstall -n agent_a"));

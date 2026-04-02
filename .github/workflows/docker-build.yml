@@ -2,14 +2,13 @@ name: Build and Push Images Based on Version
 
 # 在这里定义统一版本号
 env:
-  VERSION: "2.0.7-beta"
+  VERSION: "2.0.8"
   IMAGE_PREFIX: "ghcr.io/aict666"
 
 on:
   push:
     branches:
       - main
-      - beta
   workflow_dispatch:
 
 permissions:
@@ -265,10 +264,6 @@ jobs:
           gh release upload "${VERSION}" ./install.sh --clobber
           gh release upload "${VERSION}" ./panel_install.sh --clobber
 
-          echo "📤 上传 compose 文件..."
-          gh release upload "${VERSION}" ./docker-compose-v4.yml --clobber
-          gh release upload "${VERSION}" ./docker-compose-v6.yml --clobber
-          
           echo "📤 上传 Docker Compose 配置文件..."
           gh release upload "${VERSION}" ./docker-compose-v4.yml --clobber
           gh release upload "${VERSION}" ./docker-compose-v6.yml --clobber

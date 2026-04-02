@@ -24,7 +24,7 @@ get_architecture() {
 build_download_url() {
     local arch
     arch=$(get_architecture)
-    echo "https://github.com/aict666/flux-panel/releases/download/2.0.7-beta/gost-${arch}"
+    echo "https://github.com/aict666/flux-panel/releases/latest/download/gost-${arch}"
 }
 
 DOWNLOAD_URL=$(build_download_url)
