@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS node (
   secret VARCHAR(100) NOT NULL,
   server_ip VARCHAR(100) NOT NULL,
   port TEXT NOT NULL,
+  install_service_name VARCHAR(100),
   interface_name VARCHAR(200),
   version VARCHAR(100),
   http INTEGER NOT NULL DEFAULT 0,
@@ -123,4 +124,3 @@ CREATE TABLE IF NOT EXISTS vite_config (
   value VARCHAR(200) NOT NULL,
   time INTEGER NOT NULL
 );
-

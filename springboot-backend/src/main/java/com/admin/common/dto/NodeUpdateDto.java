@@ -20,6 +20,8 @@ public class NodeUpdateDto {
     @NotBlank(message = "可用port不能为空")
     private String port;
 
+    private String installServiceName;
+
     private String interfaceName;
     private Integer http;
     private Integer tls;
@@ -28,4 +30,4 @@ public class NodeUpdateDto {
     private String tcpListenAddr = "0.0.0.0";
 
     private String udpListenAddr = "0.0.0.0";
-} 
+}

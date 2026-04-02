@@ -19,7 +19,8 @@ import {
   getNodeList, 
   updateNode, 
   deleteNode,
-  getNodeInstallCommand
+  getNodeInstallCommand,
+  type NodeInstallCommandData
 } from "@/api";
 
 interface Node {
@@ -28,6 +29,7 @@ interface Node {
   ip: string;
   serverIp: string;
   port: string;
+  installServiceName?: string;
   tcpListenAddr?: string;
   udpListenAddr?: string;
   version?: string;
@@ -53,6 +55,7 @@ interface NodeForm {
   name: string;
   serverIp: string;
   port: string;
+  installServiceName: string;
   tcpListenAddr: string;
   udpListenAddr: string;
   interfaceName: string;
@@ -78,6 +81,7 @@ export default function NodePage() {
     name: '',
     serverIp: '',
     port: '1000-65535',
+    installServiceName: 'flux_agent',
     tcpListenAddr: '[::]',
     udpListenAddr: '[::]',
     interfaceName: '',
@@ -89,8 +93,9 @@ export default function NodePage() {
   
   // 安装命令相关状态
   const [installCommandModal, setInstallCommandModal] = useState(false);
-  const [installCommand, setInstallCommand] = useState('');
+  const [installCommands, setInstallCommands] = useState<NodeInstallCommandData | null>(null);
   const [currentNodeName, setCurrentNodeName] = useState('');
+  const [currentServiceName, setCurrentServiceName] = useState('flux_agent');
   
   const websocketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -417,6 +422,17 @@ export default function NodePage() {
     return { valid: true };
   };
 
+  const validateInstallServiceName = (serviceName: string): { valid: boolean; error?: string } => {
+    const trimmed = serviceName.trim();
+    if (!trimmed) {
+      return { valid: false, error: '请输入安装服务名' };
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(trimmed)) {
+      return { valid: false, error: '仅允许字母、数字、点、下划线和中划线' };
+    }
+    return { valid: true };
+  };
+
   // 表单验证
   const validateForm = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -438,6 +454,11 @@ export default function NodePage() {
     const portValidation = validatePort(form.port);
     if (!portValidation.valid) {
       newErrors.port = portValidation.error || '端口格式错误';
+    }
+
+    const installServiceNameValidation = validateInstallServiceName(form.installServiceName);
+    if (!installServiceNameValidation.valid) {
+      newErrors.installServiceName = installServiceNameValidation.error || '安装服务名格式错误';
     }
     
     setErrors(newErrors);
@@ -463,6 +484,7 @@ export default function NodePage() {
       name: node.name,
       serverIp: node.serverIp || '',
       port: node.port || '1000-65535',
+      installServiceName: node.installServiceName || 'flux_agent',
       tcpListenAddr: node.tcpListenAddr || '[::]',
       udpListenAddr: node.udpListenAddr || '[::]',
       interfaceName: (node as any).interfaceName || '',
@@ -512,15 +534,10 @@ export default function NodePage() {
     try {
       const res = await getNodeInstallCommand(node.id);
       if (res.code === 0 && res.data) {
-        try {
-          await navigator.clipboard.writeText(res.data);
-          toast.success('安装命令已复制到剪贴板');
-        } catch (copyError) {
-          // 复制失败，显示安装命令模态框
-          setInstallCommand(res.data);
-          setCurrentNodeName(node.name);
-          setInstallCommandModal(true);
-        }
+        setInstallCommands(res.data);
+        setCurrentNodeName(node.name);
+        setCurrentServiceName(res.data.serviceName);
+        setInstallCommandModal(true);
       } else {
         toast.error(res.msg || '获取安装命令失败');
       }
@@ -534,11 +551,10 @@ export default function NodePage() {
   };
 
   // 手动复制安装命令
-  const handleManualCopy = async () => {
+  const handleManualCopy = async (command: string) => {
     try {
-      await navigator.clipboard.writeText(installCommand);
-      toast.success('安装命令已复制到剪贴板');
-      setInstallCommandModal(false);
+      await navigator.clipboard.writeText(command);
+      toast.success('命令已复制到剪贴板');
     } catch (error) {
       toast.error('复制失败，请手动选择文本复制');
     }
@@ -568,6 +584,7 @@ export default function NodePage() {
               name: form.name,
               serverIp: form.serverIp,
               port: form.port,
+              installServiceName: form.installServiceName,
               tcpListenAddr: form.tcpListenAddr,
               udpListenAddr: form.udpListenAddr,
               interfaceName: form.interfaceName,
@@ -596,6 +613,7 @@ export default function NodePage() {
       name: '',
       serverIp: '',
       port: '1000-65535',
+      installServiceName: 'flux_agent',
       tcpListenAddr: '[::]',
       udpListenAddr: '[::]',
       interfaceName: '',
@@ -689,6 +707,12 @@ export default function NodePage() {
                     <div className="flex justify-between text-sm">
                       <span className="text-default-600">版本</span>
                       <span className="text-xs">{node.version || '未知'}</span>
+                    </div>
+                    <div className="flex justify-between text-sm min-w-0">
+                      <span className="text-default-600 flex-shrink-0">服务名</span>
+                      <span className="text-xs font-mono truncate ml-2" title={node.installServiceName || 'flux_agent'}>
+                        {node.installServiceName || 'flux_agent'}
+                      </span>
                     </div>
                     <div className="flex justify-between text-sm">
                       <span className="text-default-600">开机时间</span>
@@ -801,7 +825,7 @@ export default function NodePage() {
                         isLoading={node.copyLoading}
                         className="flex-1 min-h-8"
                       >
-                        安装
+                        命令
                       </Button>
                       <Button
                         size="sm"
@@ -871,6 +895,20 @@ export default function NodePage() {
                   errorMessage={errors.port}
                   variant="bordered"
                   description="支持单个端口(80)、多个端口(80,443)或端口范围(1000-65535)，多个可用逗号分隔"
+                  classNames={{
+                    input: "font-mono"
+                  }}
+                />
+
+                <Input
+                  label="安装服务名"
+                  placeholder="例如: flux_agent_node1"
+                  value={form.installServiceName}
+                  onChange={(e) => setForm(prev => ({ ...prev, installServiceName: e.target.value }))}
+                  isInvalid={!!errors.installServiceName}
+                  errorMessage={errors.installServiceName}
+                  variant="bordered"
+                  description="同一台服务器安装多个 agent 时，请为每个实例使用不同的服务名"
                   classNames={{
                     input: "font-mono"
                   }}
@@ -1077,36 +1115,85 @@ export default function NodePage() {
         placement="center"
         >
           <ModalContent>
-            <ModalHeader>安装命令 - {currentNodeName}</ModalHeader>
+            <ModalHeader>节点命令 - {currentNodeName}</ModalHeader>
             <ModalBody>
               <div className="space-y-4">
                 <p className="text-sm text-default-600">
-                  请复制以下安装命令到服务器上执行：
+                  当前服务名：<span className="font-mono">{currentServiceName}</span>
                 </p>
-                <div className="relative">
-                  <Textarea
-                    value={installCommand}
-                    readOnly
-                    variant="bordered"
-                    minRows={6}
-                    maxRows={10}
-                    className="font-mono text-sm"
-                    classNames={{
-                      input: "font-mono text-sm"
-                    }}
-                  />
-                  <Button
-                    size="sm"
-                    color="primary"
-                    variant="flat"
-                    className="absolute top-2 right-2"
-                    onPress={handleManualCopy}
-                  >
-                    复制
-                  </Button>
+                <div className="space-y-4">
+                  <div className="relative">
+                    <div className="text-sm font-medium mb-2">安装命令</div>
+                    <Textarea
+                      value={installCommands?.installCommand || ''}
+                      readOnly
+                      variant="bordered"
+                      minRows={4}
+                      maxRows={8}
+                      className="font-mono text-sm"
+                      classNames={{
+                        input: "font-mono text-sm"
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      color="primary"
+                      variant="flat"
+                      className="absolute top-8 right-2"
+                      onPress={() => handleManualCopy(installCommands?.installCommand || '')}
+                    >
+                      复制
+                    </Button>
+                  </div>
+                  <div className="relative">
+                    <div className="text-sm font-medium mb-2">更新命令</div>
+                    <Textarea
+                      value={installCommands?.updateCommand || ''}
+                      readOnly
+                      variant="bordered"
+                      minRows={3}
+                      maxRows={6}
+                      className="font-mono text-sm"
+                      classNames={{
+                        input: "font-mono text-sm"
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      color="primary"
+                      variant="flat"
+                      className="absolute top-8 right-2"
+                      onPress={() => handleManualCopy(installCommands?.updateCommand || '')}
+                    >
+                      复制
+                    </Button>
+                  </div>
+                  <div className="relative">
+                    <div className="text-sm font-medium mb-2">卸载命令</div>
+                    <Textarea
+                      value={installCommands?.uninstallCommand || ''}
+                      readOnly
+                      variant="bordered"
+                      minRows={3}
+                      maxRows={6}
+                      className="font-mono text-sm"
+                      classNames={{
+                        input: "font-mono text-sm"
+                      }}
+                    />
+                    <Button
+                      size="sm"
+                      color="primary"
+                      variant="flat"
+                      className="absolute top-8 right-2"
+                      onPress={() => handleManualCopy(installCommands?.uninstallCommand || '')}
+                    >
+                      复制
+                    </Button>
+                  </div>
                 </div>
                 <div className="text-xs text-default-500">
-                  💡 提示：如果复制按钮失效，请手动选择上方文本进行复制
+                  💡 提示：安装时需要服务器地址和密钥；更新、卸载只要沿用同一个服务名即可
                 </div>
               </div>
             </ModalBody>
@@ -1123,4 +1210,4 @@ export default function NodePage() {
       </div>
     
   );
-} 
+}

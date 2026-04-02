@@ -28,6 +28,8 @@ public class Node extends BaseEntity {
 
     private String port;
 
+    private String installServiceName;
+
     private Integer http;
 
     private Integer tls;

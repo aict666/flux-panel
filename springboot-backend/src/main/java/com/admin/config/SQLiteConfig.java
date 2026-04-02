@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.Statement;
 
 /**
@@ -39,6 +40,7 @@ public class SQLiteConfig implements ApplicationRunner {
             statement.execute("PRAGMA temp_store=MEMORY;");
             statement.execute("PRAGMA busy_timeout=5000;"); // 5秒超时
             statement.execute("PRAGMA wal_autocheckpoint=1000;"); // 每1000页自动checkpoint
+            ensureNodeInstallServiceNameColumn(connection, statement);
             
             log.info("SQLite WAL mode configured successfully");
         } catch (Exception e) {
@@ -79,5 +81,16 @@ public class SQLiteConfig implements ApplicationRunner {
             log.error("Failed to perform final SQLite checkpoint", e);
         }
     }
-}
 
+    private void ensureNodeInstallServiceNameColumn(Connection connection, Statement statement) throws Exception {
+        try (ResultSet columns = connection.createStatement().executeQuery("PRAGMA table_info(node)")) {
+            while (columns.next()) {
+                if ("install_service_name".equalsIgnoreCase(columns.getString("name"))) {
+                    return;
+                }
+            }
+        }
+        statement.execute("ALTER TABLE node ADD COLUMN install_service_name VARCHAR(100)");
+        log.info("SQLite migration applied: added node.install_service_name");
+    }
+}

@@ -19,10 +19,12 @@ public class NodeDto {
     @NotBlank(message = "可用端口不能为空")
     private String port;
 
+    private String installServiceName;
+
     private String interfaceName;
 
     private String tcpListenAddr = "0.0.0.0";
 
     private String udpListenAddr = "0.0.0.0";
 
-} 
+}

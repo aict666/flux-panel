@@ -1,22 +1,19 @@
 package com.admin.service.impl;
 
 import cn.hutool.core.util.IdUtil;
-import cn.hutool.core.util.StrUtil;
 import com.admin.common.dto.GostDto;
 import com.admin.common.dto.NodeDto;
+import com.admin.common.dto.NodeInstallCommandDto;
 import com.admin.common.dto.NodeUpdateDto;
 import com.admin.common.lang.R;
 import com.admin.common.utils.GostUtil;
 import com.admin.common.utils.WebSocketServer;
 import com.admin.entity.*;
 import com.admin.mapper.NodeMapper;
-import com.admin.mapper.TunnelMapper;
 import com.admin.service.*;
 import com.alibaba.fastjson.JSONObject;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
-import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import org.springframework.beans.BeanUtils;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
@@ -25,11 +22,12 @@ import java.util.List;
 import java.util.Objects;
 import java.util.regex.Pattern;
 
-import org.springframework.beans.factory.annotation.Value;
-
 @Service
 public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements NodeService {
 
+    private static final String DEFAULT_INSTALL_SERVICE_NAME = "flux_agent";
+    private static final Pattern PORT_PATTERN = Pattern.compile("([0-9]{1,5})(-([0-9]{1,5}))?");
+    private static final Pattern SERVICE_NAME_PATTERN = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$");
 
     @Resource
     @Lazy
@@ -55,6 +53,7 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
         node.setCreatedTime(currentTime);
         node.setUpdatedTime(currentTime);
         node.setInterfaceName(nodeDto.getInterfaceName());
+        node.setInstallServiceName(normalizeInstallServiceName(nodeDto.getInstallServiceName()));
         this.save(node);
         return R.ok();
     }
@@ -126,13 +125,17 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
         ViteConfig viteConfig = viteConfigService.getOne(new QueryWrapper<ViteConfig>().eq("name", "ip"));
         if (viteConfig == null) return R.err("请先前往网站配置中设置ip");
         StringBuilder command = new StringBuilder();
-        command.append("curl -L https://github.com/bqlpfy/flux-panel/releases/download/2.0.7-beta/install.sh")
+        command.append("curl -L https://github.com/aict666/flux-panel/releases/download/2.0.7-beta/install.sh")
                 .append(" -o ./install.sh && chmod +x ./install.sh && ");
         String processedServerAddr = GostUtil.processServerAddress(viteConfig.getValue());
-        command.append("./install.sh")
-                .append(" -a ").append(processedServerAddr)  // 服务器地址
-                .append(" -s ").append(node.getSecret());    // 节点密钥
-        return R.ok(command);
+        String serviceName = normalizeInstallServiceName(node.getInstallServiceName());
+
+        NodeInstallCommandDto dto = new NodeInstallCommandDto();
+        dto.setServiceName(serviceName);
+        dto.setInstallCommand(command + "./install.sh -n " + serviceName + " -a " + processedServerAddr + " -s " + node.getSecret());
+        dto.setUpdateCommand(command + "./install.sh --update -n " + serviceName);
+        dto.setUninstallCommand(command + "./install.sh --uninstall -n " + serviceName);
+        return R.ok(dto);
 
     }
 
@@ -151,12 +154,12 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
         node.setInterfaceName(nodeUpdateDto.getInterfaceName());
         node.setTcpListenAddr(nodeUpdateDto.getTcpListenAddr());
         node.setUdpListenAddr(nodeUpdateDto.getUdpListenAddr());
+        node.setInstallServiceName(normalizeInstallServiceName(nodeUpdateDto.getInstallServiceName()));
         return node;
     }
 
 
     private void validatePortRange(String port) {
-        Pattern PORT_PATTERN = Pattern.compile(   "([0-9]{1,5})(-([0-9]{1,5}))?");
         if (port == null || port.isEmpty()) {
             throw new RuntimeException("可用端口不合法");
         }
@@ -182,6 +185,15 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
         }
     }
 
+    private String normalizeInstallServiceName(String installServiceName) {
+        String normalized = (installServiceName == null || installServiceName.isBlank())
+                ? DEFAULT_INSTALL_SERVICE_NAME
+                : installServiceName.trim();
+        if (!SERVICE_NAME_PATTERN.matcher(normalized).matches()) {
+            throw new RuntimeException("安装服务名不合法");
+        }
+        return normalized;
+    }
 
 
 
