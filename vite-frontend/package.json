@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "vitest run",
     "lint": "eslint --fix",
     "preview": "vite preview"
   },
@@ -84,6 +85,7 @@
     "prettier": "3.5.3",
     "typescript": "5.6.3",
     "vite": "5.4.11",
-    "vite-tsconfig-paths": "4.3.2"
+    "vite-tsconfig-paths": "4.3.2",
+    "vitest": "^2.1.9"
   }
 }
