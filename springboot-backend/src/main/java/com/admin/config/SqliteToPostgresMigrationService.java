@@ -99,6 +99,19 @@ public class SqliteToPostgresMigrationService {
         return connection;
     }
 
+    static String buildNodeMigrationSelectSql(boolean hasInstallServiceName) {
+        String installServiceNameSelect = hasInstallServiceName
+                ? "install_service_name,"
+                : "NULL AS install_service_name,";
+        return """
+                SELECT id, name, secret, server_ip, port, %s
+                       interface_name, version, http, tls, socks, created_time, updated_time, status,
+                       tcp_listen_addr, udp_listen_addr
+                FROM node
+                ORDER BY id
+                """.formatted(installServiceNameSelect);
+    }
+
     private boolean targetHasExistingData(Connection postgresConnection) throws SQLException {
         try (Statement statement = postgresConnection.createStatement();
              ResultSet resultSet = statement.executeQuery("""
@@ -183,12 +196,7 @@ public class SqliteToPostgresMigrationService {
             return;
         }
         boolean hasInstallServiceName = hasColumn(sqliteConnection, "node", "install_service_name");
-        try (PreparedStatement query = sqliteConnection.prepareStatement("""
-                SELECT id, name, secret, server_ip, port, interface_name, version, http, tls, socks, created_time, updated_time, status,
-                       tcp_listen_addr, udp_listen_addr
-                FROM node
-                ORDER BY id
-                """);
+        try (PreparedStatement query = sqliteConnection.prepareStatement(buildNodeMigrationSelectSql(hasInstallServiceName));
              ResultSet resultSet = query.executeQuery();
              PreparedStatement insert = postgresConnection.prepareStatement("""
                      INSERT INTO node (id, name, secret, server_ip, port, install_service_name, interface_name, version, http, tls, socks,
@@ -202,7 +210,7 @@ public class SqliteToPostgresMigrationService {
                 insert.setString(3, resultSet.getString("secret"));
                 insert.setString(4, resultSet.getString("server_ip"));
                 insert.setString(5, resultSet.getString("port"));
-                insert.setString(6, hasInstallServiceName ? resultSet.getString("install_service_name") : null);
+                insert.setString(6, resultSet.getString("install_service_name"));
                 insert.setString(7, resultSet.getString("interface_name"));
                 insert.setString(8, resultSet.getString("version"));
                 insert.setInt(9, resultSet.getInt("http"));

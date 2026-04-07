@@ -79,6 +79,94 @@ class SqliteReadOnlyMigrationRegressionTest {
         }
     }
 
+    @Test
+    void nodeMigrationSelectShouldAlwaysExposeInstallServiceNameColumn() throws Exception {
+        Path sqliteFile = Files.createTempFile("sqlite-node-select", ".db");
+        try {
+            try (Connection withColumnConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile);
+                 Statement statement = withColumnConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE node (
+                          id INTEGER PRIMARY KEY,
+                          name TEXT NOT NULL,
+                          secret TEXT NOT NULL,
+                          server_ip TEXT NOT NULL,
+                          port TEXT NOT NULL,
+                          install_service_name TEXT,
+                          interface_name TEXT,
+                          version TEXT,
+                          http INTEGER NOT NULL,
+                          tls INTEGER NOT NULL,
+                          socks INTEGER NOT NULL,
+                          created_time INTEGER NOT NULL,
+                          updated_time INTEGER,
+                          status INTEGER NOT NULL,
+                          tcp_listen_addr TEXT NOT NULL,
+                          udp_listen_addr TEXT NOT NULL
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO node (
+                          id, name, secret, server_ip, port, install_service_name, interface_name, version, http, tls, socks,
+                          created_time, updated_time, status, tcp_listen_addr, udp_listen_addr
+                        ) VALUES (
+                          1, 'node-a', 'secret-a', '1.1.1.1', '1000', 'flux-node', '', '', 0, 0, 0, 1, NULL, 1, '[::]', '[::]'
+                        )
+                        """);
+            }
+
+            try (Connection withColumnConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile);
+                 Statement statement = withColumnConnection.createStatement();
+                 ResultSet resultSet = statement.executeQuery(SqliteToPostgresMigrationService.buildNodeMigrationSelectSql(true))) {
+                assertTrue(resultSet.next());
+                assertEquals("flux-node", resultSet.getString("install_service_name"));
+            }
+
+            Files.delete(sqliteFile);
+            sqliteFile = Files.createTempFile("sqlite-node-select-old", ".db");
+
+            try (Connection withoutColumnConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile);
+                 Statement statement = withoutColumnConnection.createStatement()) {
+                statement.execute("""
+                        CREATE TABLE node (
+                          id INTEGER PRIMARY KEY,
+                          name TEXT NOT NULL,
+                          secret TEXT NOT NULL,
+                          server_ip TEXT NOT NULL,
+                          port TEXT NOT NULL,
+                          interface_name TEXT,
+                          version TEXT,
+                          http INTEGER NOT NULL,
+                          tls INTEGER NOT NULL,
+                          socks INTEGER NOT NULL,
+                          created_time INTEGER NOT NULL,
+                          updated_time INTEGER,
+                          status INTEGER NOT NULL,
+                          tcp_listen_addr TEXT NOT NULL,
+                          udp_listen_addr TEXT NOT NULL
+                        )
+                        """);
+                statement.execute("""
+                        INSERT INTO node (
+                          id, name, secret, server_ip, port, interface_name, version, http, tls, socks,
+                          created_time, updated_time, status, tcp_listen_addr, udp_listen_addr
+                        ) VALUES (
+                          1, 'node-b', 'secret-b', '2.2.2.2', '2000', '', '', 0, 0, 0, 1, NULL, 1, '[::]', '[::]'
+                        )
+                        """);
+            }
+
+            try (Connection withoutColumnConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile);
+                 Statement statement = withoutColumnConnection.createStatement();
+                 ResultSet resultSet = statement.executeQuery(SqliteToPostgresMigrationService.buildNodeMigrationSelectSql(false))) {
+                assertTrue(resultSet.next());
+                assertEquals(null, resultSet.getString("install_service_name"));
+            }
+        } finally {
+            deleteIfExists(sqliteFile);
+        }
+    }
+
     private void makeReadOnly(Path path) throws IOException {
         Files.setPosixFilePermissions(path, Set.of(PosixFilePermission.OWNER_READ));
     }
