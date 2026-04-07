@@ -11,6 +11,22 @@ export interface FlowSeriesPoint {
   flow: number;
 }
 
+export type FlowStatsScope = "self" | "global";
+export type FlowStatsRankingMode = "top10" | "all";
+
+export interface FlowStatsSummary {
+  totalInFlow: number;
+  totalOutFlow: number;
+  totalFlow: number;
+}
+
+export interface FlowStatsMeta {
+  scope: FlowStatsScope;
+  rankingMode?: FlowStatsRankingMode | null;
+  totalRuleCount: number;
+  returnedRuleCount: number;
+}
+
 export interface FlowChartPoint {
   hourTime: number;
   label: string;
@@ -23,6 +39,7 @@ export interface FlowChartPoint {
 export interface ForwardFlowStat {
   id: number;
   name: string;
+  userName?: string;
   tunnelId: number;
   tunnelName: string;
   inAddress: string;
@@ -93,6 +110,55 @@ export function sortForwardStats(rows: ForwardFlowStat[]): ForwardFlowStat[] {
     }
     return left.id - right.id;
   });
+}
+
+export function selectDefaultHourTime(series: FlowSeriesPoint[], fallbackHourTime: number): number {
+  const sorted = [...series].sort((left, right) => left.hourTime - right.hourTime);
+  for (let index = sorted.length - 1; index >= 0; index -= 1) {
+    if ((sorted[index].flow ?? 0) > 0) {
+      return sorted[index].hourTime;
+    }
+  }
+  return fallbackHourTime;
+}
+
+export function buildHourDetailCacheKey(
+  scope: FlowStatsScope,
+  startTime: number,
+  endTime: number,
+  hourTime: number,
+): string {
+  return `${scope}:${startTime}:${endTime}:${hourTime}`;
+}
+
+export function getForwardStatsHeading(rankingMode: FlowStatsRankingMode | null | undefined): string {
+  return rankingMode === "all" ? "当前时间段全部规则" : "当前时间段 Top 10 规则";
+}
+
+export function shouldShowForwardOwner(scope: FlowStatsScope): boolean {
+  return scope === "global";
+}
+
+export function shouldCollapseForwardStatsByDefault(
+  rankingMode: FlowStatsRankingMode | null | undefined,
+): boolean {
+  return rankingMode === "all";
+}
+
+export function resolveHourTimeFromChartInteraction(
+  chartData: FlowChartPoint[],
+  activeIndex: number | string | null | undefined,
+): number | null {
+  if (activeIndex === undefined || activeIndex === null) {
+    return null;
+  }
+
+  const normalizedIndex = typeof activeIndex === "string" ? Number.parseInt(activeIndex, 10) : activeIndex;
+  if (!Number.isInteger(normalizedIndex) || normalizedIndex < 0 || normalizedIndex >= chartData.length) {
+    return null;
+  }
+
+  return chartData[normalizedIndex]?.hourTime ?? null;
 }
 
 export function toDatetimeLocalValue(date: Date): string {

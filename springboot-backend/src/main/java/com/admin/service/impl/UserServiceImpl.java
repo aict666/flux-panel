@@ -44,6 +44,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     private static final long MAX_FLOW_STATS_RANGE_MILLIS = ChronoUnit.DAYS.getDuration().toMillis() * 30;
     private static final DateTimeFormatter LEGACY_HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
     private static final DateTimeFormatter RANGE_HOUR_FORMATTER = DateTimeFormatter.ofPattern("MM-dd HH:mm");
+    private static final int USER_FORWARD_STATS_LIMIT = 10;
 
     @Resource
     @Lazy
@@ -169,47 +170,106 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     @Override
     public R getUserPackageInfo() {
         Integer userId = JwtUtil.getUserIdFromToken();
+        boolean adminScope = isAdminScope();
         User user = this.getById(userId);
         if (user == null) return R.err("用户不存在");
-        UserPackageDto.UserInfoDto userInfo = buildUserInfoDto(user);
-        List<UserPackageDto.UserTunnelDetailDto> tunnelPermissions = userMapper.getUserTunnelDetails(userId);
-        List<UserPackageDto.UserForwardDetailDto> forwards = userMapper.getUserForwardDetails(user.getId().intValue());
+
+        List<UserPackageDto.UserTunnelDetailDto> tunnelPermissions = adminScope
+                ? userMapper.getAllTunnelsForAdmin()
+                : userMapper.getUserTunnelDetails(userId);
+        List<UserPackageDto.UserForwardDetailDto> forwards = loadForwardDetails(adminScope, user.getId());
         fillForwardInIpAndPort(forwards);
-        List<StatisticsFlow> statisticsFlows = getLast24HoursFlowStatistics(user.getId());
+
         UserPackageDto packageDto = new UserPackageDto();
-        packageDto.setUserInfo(userInfo);
+        packageDto.setDashboardMode(adminScope ? "admin" : "user");
+        packageDto.setUserInfo(buildUserInfoDto(user));
         packageDto.setTunnelPermissions(tunnelPermissions);
         packageDto.setForwards(forwards);
-        packageDto.setStatisticsFlows(statisticsFlows);
+        packageDto.setStatisticsFlows(adminScope ? new ArrayList<>() : getLast24HoursFlowStatistics(user.getId()));
+        if (adminScope) {
+            packageDto.setAdminOverview(buildAdminOverview());
+        }
         return R.ok(packageDto);
     }
 
     @Override
     public R getUserPackageFlowStats(FlowStatsQueryDto flowStatsQueryDto) {
-        if (flowStatsQueryDto.getEndTime() <= flowStatsQueryDto.getStartTime()) {
-            return R.err("结束时间必须大于开始时间");
-        }
-        if (flowStatsQueryDto.getEndTime() - flowStatsQueryDto.getStartTime() > MAX_FLOW_STATS_RANGE_MILLIS) {
-            return R.err("统计时间范围不能超过30天");
-        }
-
         Integer userId = JwtUtil.getUserIdFromToken();
+        boolean adminScope = isAdminScope();
         User user = this.getById(userId);
         if (user == null) {
             return R.err("用户不存在");
         }
 
+        String validationError = validateRange(flowStatsQueryDto.getStartTime(), flowStatsQueryDto.getEndTime());
+        if (validationError != null) {
+            return R.err(validationError);
+        }
+
         NormalizedRange range = normalizeRange(flowStatsQueryDto.getStartTime(), flowStatsQueryDto.getEndTime());
-        List<UserPackageDto.UserForwardDetailDto> forwards = userMapper.getUserForwardDetails(user.getId().intValue());
+        List<UserPackageDto.UserForwardDetailDto> forwards = loadForwardDetails(adminScope, user.getId());
         fillForwardInIpAndPort(forwards);
+        List<UserPackageFlowStatsDto.SeriesPointDto> series = buildSeries(adminScope ? null : user.getId(), range);
+        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> allForwardStats = buildForwardStats(adminScope ? null : user.getId(), range, forwards);
+        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> visibleForwardStats = adminScope
+                ? allForwardStats
+                : allForwardStats.stream().limit(USER_FORWARD_STATS_LIMIT).toList();
 
         UserPackageFlowStatsDto result = new UserPackageFlowStatsDto();
         UserPackageFlowStatsDto.RangeDto rangeDto = new UserPackageFlowStatsDto.RangeDto();
         rangeDto.setStartTime(range.startTime);
         rangeDto.setEndTime(range.endTime);
         result.setRange(rangeDto);
-        result.setSeries(buildSeries(user.getId(), range));
-        result.setForwardStats(buildForwardStats(user.getId(), range, forwards));
+        result.setSummary(buildSummaryFromSeries(series));
+        result.setMeta(buildMeta(
+                adminScope ? "global" : "self",
+                adminScope ? "all" : "top10",
+                allForwardStats.size(),
+                visibleForwardStats.size()
+        ));
+        result.setDefaultHourTime(selectDefaultHourTime(series, range.endTime));
+        result.setSeries(series);
+        result.setForwardStats(visibleForwardStats);
+        return R.ok(result);
+    }
+
+    @Override
+    public R getUserPackageFlowHourDetail(FlowStatsHourDetailQueryDto flowStatsHourDetailQueryDto) {
+        Integer userId = JwtUtil.getUserIdFromToken();
+        boolean adminScope = isAdminScope();
+        User user = this.getById(userId);
+        if (user == null) {
+            return R.err("用户不存在");
+        }
+
+        String validationError = validateRange(flowStatsHourDetailQueryDto.getStartTime(), flowStatsHourDetailQueryDto.getEndTime());
+        if (validationError != null) {
+            return R.err(validationError);
+        }
+
+        NormalizedRange range = normalizeRange(flowStatsHourDetailQueryDto.getStartTime(), flowStatsHourDetailQueryDto.getEndTime());
+        long hourTime = truncateToHour(flowStatsHourDetailQueryDto.getHourTime());
+        if (hourTime < range.startTime || hourTime > range.endTime) {
+            return R.err("小时必须位于统计时间范围内");
+        }
+
+        List<UserPackageDto.UserForwardDetailDto> forwards = loadForwardDetails(adminScope, user.getId());
+        fillForwardInIpAndPort(forwards);
+        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> rows = buildHourDetailRows(adminScope ? null : user.getId(), hourTime, forwards);
+
+        UserPackageFlowHourDetailDto result = new UserPackageFlowHourDetailDto();
+        UserPackageFlowHourDetailDto.HourDto hourDto = new UserPackageFlowHourDetailDto.HourDto();
+        hourDto.setHourTime(hourTime);
+        hourDto.setTime(formatHour(hourTime, RANGE_HOUR_FORMATTER));
+        result.setHour(hourDto);
+        result.setSummary(buildSummaryFromRows(rows));
+        result.setMeta(buildMeta(
+                adminScope ? "global" : "self",
+                null,
+                rows.size(),
+                rows.size()
+        ));
+        result.setRows(rows);
         return R.ok(result);
     }
 
@@ -273,6 +333,21 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         userInfo.setCreatedTime(user.getCreatedTime());
         userInfo.setUpdatedTime(user.getUpdatedTime());
         return userInfo;
+    }
+
+    private UserPackageDto.AdminOverviewDto buildAdminOverview() {
+        List<User> users = this.list(new QueryWrapper<User>().gt("id", 0));
+        long totalInFlow = users.stream().mapToLong(item -> defaultLong(item.getInFlow())).sum();
+        long totalOutFlow = users.stream().mapToLong(item -> defaultLong(item.getOutFlow())).sum();
+
+        UserPackageDto.AdminOverviewDto adminOverview = new UserPackageDto.AdminOverviewDto();
+        adminOverview.setUserCount((long) users.size());
+        adminOverview.setTunnelCount((long) tunnelService.count(new QueryWrapper<Tunnel>().gt("id", 0)));
+        adminOverview.setForwardCount((long) forwardService.count(new QueryWrapper<Forward>().gt("id", 0)));
+        adminOverview.setTotalInFlow(totalInFlow);
+        adminOverview.setTotalOutFlow(totalOutFlow);
+        adminOverview.setTotalFlow(totalInFlow + totalOutFlow);
+        return adminOverview;
     }
 
     private List<StatisticsFlow> getLast24HoursFlowStatistics(Long userId) {
@@ -377,31 +452,43 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     private List<UserPackageFlowStatsDto.SeriesPointDto> buildSeries(Long userId, NormalizedRange range) {
-        List<StatisticsFlow> flowList = statisticsFlowService.list(
-                new QueryWrapper<StatisticsFlow>()
-                        .eq("user_id", userId)
-                        .between("hour_time", range.startTime, range.endTime)
-                        .orderByAsc("hour_time")
-        );
-        Map<Long, StatisticsFlow> flowMap = new LinkedHashMap<>();
+        QueryWrapper<StatisticsFlow> queryWrapper = new QueryWrapper<StatisticsFlow>()
+                .between("hour_time", range.startTime, range.endTime)
+                .orderByAsc("hour_time");
+        if (userId != null) {
+            queryWrapper.eq("user_id", userId);
+        }
+
+        List<StatisticsFlow> flowList = statisticsFlowService.list(queryWrapper);
+        Map<Long, UserPackageFlowStatsDto.SeriesPointDto> flowMap = new LinkedHashMap<>();
         for (StatisticsFlow statisticsFlow : flowList) {
-            flowMap.put(statisticsFlow.getHourTime(), statisticsFlow);
+            if (statisticsFlow.getHourTime() == null) {
+                continue;
+            }
+            UserPackageFlowStatsDto.SeriesPointDto point = flowMap.computeIfAbsent(statisticsFlow.getHourTime(), key -> {
+                UserPackageFlowStatsDto.SeriesPointDto item = new UserPackageFlowStatsDto.SeriesPointDto();
+                item.setHourTime(key);
+                item.setTime(formatHour(key, RANGE_HOUR_FORMATTER));
+                item.setInFlow(0L);
+                item.setOutFlow(0L);
+                item.setFlow(0L);
+                return item;
+            });
+            point.setInFlow(point.getInFlow() + defaultLong(statisticsFlow.getInFlow()));
+            point.setOutFlow(point.getOutFlow() + defaultLong(statisticsFlow.getOutFlow()));
+            point.setFlow(point.getFlow() + defaultLong(statisticsFlow.getFlow()));
         }
 
         List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>();
         for (long cursor = range.startTime; cursor <= range.endTime; cursor += HOUR_MILLIS) {
-            StatisticsFlow statisticsFlow = flowMap.get(cursor);
-            UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
-            point.setHourTime(cursor);
-            point.setTime(formatHour(cursor, RANGE_HOUR_FORMATTER));
-            if (statisticsFlow == null) {
+            UserPackageFlowStatsDto.SeriesPointDto point = flowMap.get(cursor);
+            if (point == null) {
+                point = new UserPackageFlowStatsDto.SeriesPointDto();
+                point.setHourTime(cursor);
+                point.setTime(formatHour(cursor, RANGE_HOUR_FORMATTER));
                 point.setInFlow(0L);
                 point.setOutFlow(0L);
                 point.setFlow(0L);
-            } else {
-                point.setInFlow(defaultLong(statisticsFlow.getInFlow()));
-                point.setOutFlow(defaultLong(statisticsFlow.getOutFlow()));
-                point.setFlow(defaultLong(statisticsFlow.getFlow()));
             }
             result.add(point);
         }
@@ -411,18 +498,33 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildForwardStats(Long userId,
                                                                                 NormalizedRange range,
                                                                                 List<UserPackageDto.UserForwardDetailDto> forwards) {
+        QueryWrapper<ForwardStatisticsFlow> queryWrapper = new QueryWrapper<ForwardStatisticsFlow>()
+                .between("hour_time", range.startTime, range.endTime);
+        if (userId != null) {
+            queryWrapper.eq("user_id", userId);
+        }
+        return aggregateForwardStats(forwardStatisticsFlowService.list(queryWrapper), forwards);
+    }
+
+    private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildHourDetailRows(Long userId,
+                                                                                  long hourTime,
+                                                                                  List<UserPackageDto.UserForwardDetailDto> forwards) {
+        QueryWrapper<ForwardStatisticsFlow> queryWrapper = new QueryWrapper<ForwardStatisticsFlow>()
+                .eq("hour_time", hourTime);
+        if (userId != null) {
+            queryWrapper.eq("user_id", userId);
+        }
+        return aggregateForwardStats(forwardStatisticsFlowService.list(queryWrapper), forwards);
+    }
+
+    private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> aggregateForwardStats(List<ForwardStatisticsFlow> flowList,
+                                                                                    List<UserPackageDto.UserForwardDetailDto> forwards) {
         Map<Long, UserPackageDto.UserForwardDetailDto> forwardMap = new LinkedHashMap<>();
         for (UserPackageDto.UserForwardDetailDto forward : forwards) {
             forwardMap.put(forward.getId(), forward);
         }
 
         Map<Long, UserPackageFlowStatsDto.ForwardFlowStatsDto> aggregated = new LinkedHashMap<>();
-        List<ForwardStatisticsFlow> flowList = forwardStatisticsFlowService.list(
-                new QueryWrapper<ForwardStatisticsFlow>()
-                        .eq("user_id", userId)
-                        .between("hour_time", range.startTime, range.endTime)
-        );
-
         for (ForwardStatisticsFlow statisticsFlow : flowList) {
             if (statisticsFlow.getForwardId() == null) {
                 continue;
@@ -431,19 +533,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             if (forward == null) {
                 continue;
             }
-            UserPackageFlowStatsDto.ForwardFlowStatsDto dto = aggregated.computeIfAbsent(statisticsFlow.getForwardId(), key -> {
-                UserPackageFlowStatsDto.ForwardFlowStatsDto item = new UserPackageFlowStatsDto.ForwardFlowStatsDto();
-                item.setId(forward.getId());
-                item.setName(forward.getName());
-                item.setTunnelId(forward.getTunnelId());
-                item.setTunnelName(forward.getTunnelName());
-                item.setInAddress(forward.getInIp());
-                item.setRemoteAddr(forward.getRemoteAddr());
-                item.setInFlow(0L);
-                item.setOutFlow(0L);
-                item.setFlow(0L);
-                return item;
-            });
+            UserPackageFlowStatsDto.ForwardFlowStatsDto dto = aggregated.computeIfAbsent(statisticsFlow.getForwardId(), key -> createForwardStatsRow(forward));
             dto.setInFlow(dto.getInFlow() + defaultLong(statisticsFlow.getInFlow()));
             dto.setOutFlow(dto.getOutFlow() + defaultLong(statisticsFlow.getOutFlow()));
             dto.setFlow(dto.getFlow() + defaultLong(statisticsFlow.getFlow()));
@@ -453,6 +543,80 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 .sorted(Comparator.comparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).reversed()
                         .thenComparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getId))
                 .toList();
+    }
+
+    private UserPackageFlowStatsDto.ForwardFlowStatsDto createForwardStatsRow(UserPackageDto.UserForwardDetailDto forward) {
+        UserPackageFlowStatsDto.ForwardFlowStatsDto item = new UserPackageFlowStatsDto.ForwardFlowStatsDto();
+        item.setId(forward.getId());
+        item.setName(forward.getName());
+        item.setUserName(forward.getUserName());
+        item.setTunnelId(forward.getTunnelId());
+        item.setTunnelName(forward.getTunnelName());
+        item.setInAddress(forward.getInIp());
+        item.setRemoteAddr(forward.getRemoteAddr());
+        item.setInFlow(0L);
+        item.setOutFlow(0L);
+        item.setFlow(0L);
+        return item;
+    }
+
+    private UserPackageFlowStatsDto.SummaryDto buildSummaryFromSeries(List<UserPackageFlowStatsDto.SeriesPointDto> series) {
+        UserPackageFlowStatsDto.SummaryDto summary = new UserPackageFlowStatsDto.SummaryDto();
+        long totalInFlow = series.stream().mapToLong(item -> defaultLong(item.getInFlow())).sum();
+        long totalOutFlow = series.stream().mapToLong(item -> defaultLong(item.getOutFlow())).sum();
+        summary.setTotalInFlow(totalInFlow);
+        summary.setTotalOutFlow(totalOutFlow);
+        summary.setTotalFlow(totalInFlow + totalOutFlow);
+        return summary;
+    }
+
+    private UserPackageFlowStatsDto.SummaryDto buildSummaryFromRows(List<UserPackageFlowStatsDto.ForwardFlowStatsDto> rows) {
+        UserPackageFlowStatsDto.SummaryDto summary = new UserPackageFlowStatsDto.SummaryDto();
+        long totalInFlow = rows.stream().mapToLong(item -> defaultLong(item.getInFlow())).sum();
+        long totalOutFlow = rows.stream().mapToLong(item -> defaultLong(item.getOutFlow())).sum();
+        summary.setTotalInFlow(totalInFlow);
+        summary.setTotalOutFlow(totalOutFlow);
+        summary.setTotalFlow(totalInFlow + totalOutFlow);
+        return summary;
+    }
+
+    private UserPackageFlowStatsDto.MetaDto buildMeta(String scope, String rankingMode, int totalRuleCount, int returnedRuleCount) {
+        UserPackageFlowStatsDto.MetaDto meta = new UserPackageFlowStatsDto.MetaDto();
+        meta.setScope(scope);
+        meta.setRankingMode(rankingMode);
+        meta.setTotalRuleCount(totalRuleCount);
+        meta.setReturnedRuleCount(returnedRuleCount);
+        return meta;
+    }
+
+    private long selectDefaultHourTime(List<UserPackageFlowStatsDto.SeriesPointDto> series, long fallbackHourTime) {
+        for (int index = series.size() - 1; index >= 0; index--) {
+            UserPackageFlowStatsDto.SeriesPointDto point = series.get(index);
+            if (defaultLong(point.getFlow()) > 0 && point.getHourTime() != null) {
+                return point.getHourTime();
+            }
+        }
+        return fallbackHourTime;
+    }
+
+    private List<UserPackageDto.UserForwardDetailDto> loadForwardDetails(boolean adminScope, Long userId) {
+        return adminScope
+                ? userMapper.getAllForwardDetailsForAdmin()
+                : userMapper.getUserForwardDetails(userId.intValue());
+    }
+
+    private boolean isAdminScope() {
+        return Objects.equals(JwtUtil.getRoleIdFromToken(), 0);
+    }
+
+    private String validateRange(Long startTime, Long endTime) {
+        if (endTime <= startTime) {
+            return "结束时间必须大于开始时间";
+        }
+        if (endTime - startTime > MAX_FLOW_STATS_RANGE_MILLIS) {
+            return "统计时间范围不能超过30天";
+        }
+        return null;
     }
 
     private NormalizedRange normalizeRange(long startTime, long endTime) {

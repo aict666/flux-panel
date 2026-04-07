@@ -31,6 +31,7 @@
         SELECT 
             f.id,
             f.name,
+            f.user_name as userName,
             f.tunnel_id as tunnelId,
             t.name as tunnelName,
             t.in_ip as inIp,
@@ -65,6 +66,24 @@
         FROM tunnel t
         WHERE t.status = 1
         ORDER BY t.id
+    </select>
+
+    <select id="getAllForwardDetailsForAdmin" resultType="com.admin.common.dto.UserPackageDto$UserForwardDetailDto">
+        SELECT
+            f.id,
+            f.name,
+            f.user_name as userName,
+            f.tunnel_id as tunnelId,
+            t.name as tunnelName,
+            t.in_ip as inIp,
+            f.remote_addr as remoteAddr,
+            f.in_flow as inFlow,
+            f.out_flow as outFlow,
+            f.status,
+            f.created_time as createdTime
+        FROM forward f
+        LEFT JOIN tunnel t ON f.tunnel_id = t.id
+        ORDER BY f.created_time DESC
     </select>
 
 

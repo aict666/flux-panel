@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildHourDetailCacheKey,
   createDefaultFlowStatsRange,
+  getForwardStatsHeading,
   normalizeFlowSeries,
+  resolveHourTimeFromChartInteraction,
+  selectDefaultHourTime,
+  shouldCollapseForwardStatsByDefault,
+  shouldShowForwardOwner,
   sortForwardStats,
   validateFlowStatsRange,
 } from "./dashboard-flow-utils";
@@ -43,5 +49,58 @@ describe("dashboard-flow-utils", () => {
     ]);
 
     expect(rows.map((item) => item.id)).toEqual([1, 2]);
+  });
+
+  it("selects the latest non-zero hour and falls back when all hours are empty", () => {
+    expect(
+      selectDefaultHourTime(
+        [
+          { hourTime: 1000, time: "04-07 10:00", flow: 0, inFlow: 0, outFlow: 0 },
+          { hourTime: 2000, time: "04-07 11:00", flow: 12, inFlow: 10, outFlow: 2 },
+          { hourTime: 3000, time: "04-07 12:00", flow: 0, inFlow: 0, outFlow: 0 },
+          { hourTime: 4000, time: "04-07 13:00", flow: 8, inFlow: 5, outFlow: 3 },
+        ],
+        9999,
+      ),
+    ).toBe(4000);
+
+    expect(
+      selectDefaultHourTime(
+        [
+          { hourTime: 1000, time: "04-07 10:00", flow: 0, inFlow: 0, outFlow: 0 },
+          { hourTime: 2000, time: "04-07 11:00", flow: 0, inFlow: 0, outFlow: 0 },
+        ],
+        9999,
+      ),
+    ).toBe(9999);
+  });
+
+  it("builds a stable cache key for hourly detail requests", () => {
+    expect(buildHourDetailCacheKey("global", 1000, 2000, 1500)).toBe("global:1000:2000:1500");
+  });
+
+  it("returns role-specific rule table labels", () => {
+    expect(getForwardStatsHeading("top10")).toBe("当前时间段 Top 10 规则");
+    expect(getForwardStatsHeading("all")).toBe("当前时间段全部规则");
+    expect(shouldCollapseForwardStatsByDefault("top10")).toBe(false);
+    expect(shouldCollapseForwardStatsByDefault("all")).toBe(true);
+    expect(shouldShowForwardOwner("self")).toBe(false);
+    expect(shouldShowForwardOwner("global")).toBe(true);
+  });
+
+  it("resolves the hovered hour from recharts active index", () => {
+    const chartData = normalizeFlowSeries(
+      [
+        { hourTime: 1000, time: "04-07 10:00", flow: 10, inFlow: 7, outFlow: 3 },
+        { hourTime: 2000, time: "04-07 11:00", flow: 20, inFlow: 12, outFlow: 8 },
+        { hourTime: 3000, time: "04-07 12:00", flow: 30, inFlow: 18, outFlow: 12 },
+      ],
+      (value) => `${value} B`,
+    );
+
+    expect(resolveHourTimeFromChartInteraction(chartData, 1)).toBe(2000);
+    expect(resolveHourTimeFromChartInteraction(chartData, "2")).toBe(3000);
+    expect(resolveHourTimeFromChartInteraction(chartData, undefined)).toBeNull();
+    expect(resolveHourTimeFromChartInteraction(chartData, "bad-index")).toBeNull();
   });
 });

@@ -72,6 +72,12 @@ public class UserController extends BaseController {
     }
 
     @LogAnnotation
+    @PostMapping("/package/flow-stats/hour-detail")
+    public R getUserPackageFlowHourDetail(@Validated @RequestBody FlowStatsHourDetailQueryDto flowStatsHourDetailQueryDto) {
+        return userService.getUserPackageFlowHourDetail(flowStatsHourDetailQueryDto);
+    }
+
+    @LogAnnotation
     @PostMapping("/updatePassword")
     public R updatePassword(@Validated @RequestBody ChangePasswordDto changePasswordDto) {
         return userService.updatePassword(changePasswordDto);

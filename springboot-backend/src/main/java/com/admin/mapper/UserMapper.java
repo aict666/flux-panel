@@ -23,6 +23,8 @@ public interface UserMapper extends BaseMapper<User> {
      * @return 隧道权限列表
      */
     List<UserPackageDto.UserTunnelDetailDto> getUserTunnelDetails(@Param("userId") Integer userId);
+
+    List<UserPackageDto.UserTunnelDetailDto> getAllTunnelsForAdmin();
     
     /**
      * 查询用户转发详情
@@ -30,5 +32,7 @@ public interface UserMapper extends BaseMapper<User> {
      * @return 转发列表
      */
     List<UserPackageDto.UserForwardDetailDto> getUserForwardDetails(@Param("userId") Integer userId);
+
+    List<UserPackageDto.UserForwardDetailDto> getAllForwardDetailsForAdmin();
 
 }

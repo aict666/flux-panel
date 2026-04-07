@@ -10,11 +10,15 @@ import java.util.List;
  */
 @Data
 public class UserPackageDto {
+
+    private String dashboardMode;
     
     /**
      * 用户基本信息
      */
     private UserInfoDto userInfo;
+
+    private AdminOverviewDto adminOverview;
     
     /**
      * 用户隧道权限列表
@@ -49,6 +53,16 @@ public class UserPackageDto {
         private Long createdTime;
         private Long updatedTime;
     }
+
+    @Data
+    public static class AdminOverviewDto {
+        private Long userCount;
+        private Long tunnelCount;
+        private Long forwardCount;
+        private Long totalInFlow;
+        private Long totalOutFlow;
+        private Long totalFlow;
+    }
     
     /**
      * 用户隧道权限详情
@@ -78,6 +92,7 @@ public class UserPackageDto {
     public static class UserForwardDetailDto {
         private Long id;
         private String name;
+        private String userName;
         private Integer tunnelId;
         private String tunnelName;
         private String inIp;

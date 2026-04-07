@@ -28,6 +28,8 @@ public interface UserService extends IService<User> {
     R getUserPackageInfo();
 
     R getUserPackageFlowStats(FlowStatsQueryDto flowStatsQueryDto);
+
+    R getUserPackageFlowHourDetail(FlowStatsHourDetailQueryDto flowStatsHourDetailQueryDto);
     
     R updatePassword(ChangePasswordDto changePasswordDto);
 

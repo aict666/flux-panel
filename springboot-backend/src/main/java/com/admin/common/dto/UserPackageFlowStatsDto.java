@@ -10,6 +10,12 @@ public class UserPackageFlowStatsDto {
 
     private RangeDto range;
 
+    private SummaryDto summary;
+
+    private MetaDto meta;
+
+    private Long defaultHourTime;
+
     private List<SeriesPointDto> series = new ArrayList<>();
 
     private List<ForwardFlowStatsDto> forwardStats = new ArrayList<>();
@@ -18,6 +24,21 @@ public class UserPackageFlowStatsDto {
     public static class RangeDto {
         private Long startTime;
         private Long endTime;
+    }
+
+    @Data
+    public static class SummaryDto {
+        private Long totalInFlow;
+        private Long totalOutFlow;
+        private Long totalFlow;
+    }
+
+    @Data
+    public static class MetaDto {
+        private String scope;
+        private String rankingMode;
+        private Integer totalRuleCount;
+        private Integer returnedRuleCount;
     }
 
     @Data
@@ -33,6 +54,7 @@ public class UserPackageFlowStatsDto {
     public static class ForwardFlowStatsDto {
         private Long id;
         private String name;
+        private String userName;
         private Integer tunnelId;
         private String tunnelName;
         private String inAddress;
