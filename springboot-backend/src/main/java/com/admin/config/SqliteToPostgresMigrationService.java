@@ -27,6 +27,8 @@ import java.util.List;
 @Service
 public class SqliteToPostgresMigrationService {
 
+    static final String SQLITE_READ_ONLY_URI_QUERY = "mode=ro&immutable=1";
+
     private final DataSource dataSource;
     private final TunnelTopologySupport topologySupport = new TunnelTopologySupport();
 
@@ -46,7 +48,8 @@ public class SqliteToPostgresMigrationService {
             return;
         }
 
-        try (Connection sqliteConnection = DriverManager.getConnection("jdbc:sqlite:" + sourcePath);
+        String sqliteJdbcUrl = buildReadOnlyJdbcUrl(sourcePath);
+        try (Connection sqliteConnection = openReadOnlySqliteConnection(sourcePath);
              Connection postgresConnection = dataSource.getConnection()) {
             postgresConnection.setAutoCommit(false);
             try {
@@ -70,9 +73,30 @@ public class SqliteToPostgresMigrationService {
                 postgresConnection.rollback();
                 throw new IllegalStateException("SQLite 到 PostgreSQL 迁移失败", ex);
             }
+        } catch (SQLException ex) {
+            log.error("SQLite 源库只读打开失败: path={}, jdbcUrl={}，旧版数据库可能处于 WAL 模式且当前卷为只读挂载", sourcePath, sqliteJdbcUrl, ex);
+            throw new IllegalStateException("无法执行 SQLite 到 PostgreSQL 迁移", ex);
         } catch (Exception ex) {
             throw new IllegalStateException("无法执行 SQLite 到 PostgreSQL 迁移", ex);
         }
+    }
+
+    static String buildReadOnlyJdbcUrl(Path sqlitePath) {
+        return "jdbc:sqlite:" + sqlitePath.toUri() + "?" + SQLITE_READ_ONLY_URI_QUERY;
+    }
+
+    static Connection openReadOnlySqliteConnection(Path sqlitePath) throws SQLException {
+        Connection connection = DriverManager.getConnection(buildReadOnlyJdbcUrl(sqlitePath));
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("SELECT name FROM sqlite_master LIMIT 1")) {
+            if (resultSet.next()) {
+                resultSet.getString(1);
+            }
+        } catch (SQLException ex) {
+            connection.close();
+            throw ex;
+        }
+        return connection;
     }
 
     private boolean targetHasExistingData(Connection postgresConnection) throws SQLException {
