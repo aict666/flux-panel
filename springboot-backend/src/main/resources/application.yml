@@ -1,7 +1,9 @@
 spring:
   datasource:
-    driver-class-name: org.sqlite.JDBC
-    url: jdbc:sqlite:${DB_PATH:/app/data/gost.db}
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:flux_panel}
+    username: ${DB_USER:flux_panel}
+    password: ${DB_PASSWORD:flux_panel}
     hikari:
       max-lifetime: 500000
       connection-timeout: 30000
@@ -13,7 +15,6 @@ spring:
   sql:
     init:
       mode: always
-      platform: sqlite
       continue-on-error: false
   servlet:
     multipart:
@@ -43,9 +44,14 @@ mybatis-plus:
 jwt-secret: ${JWT_SECRET}
 log-dir: ${LOG_DIR}
 
-
 captcha:
   init-default-resource: true
   secondary:
     enabled: true
     expire: 120000
+
+app:
+  migration:
+    mode: ${APP_MIGRATION_MODE:}
+    sqlite-path: ${SQLITE_IMPORT_PATH:}
+    exit-after-run: ${APP_MIGRATION_EXIT_AFTER_RUN:false}

@@ -1,28 +1,26 @@
 package com.admin.entity;
 
-import com.admin.entity.BaseEntity;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
-import lombok.EqualsAndHashCode;
 
-/**
- * <p>
- * 
- * </p>
- *
- * @author QAQ
- * @since 2025-08-14
- */
 @Data
-@TableName("statistics_flow")
-public class StatisticsFlow  {
+@TableName("forward_statistics_flow")
+public class ForwardStatisticsFlow {
 
-    private static final long serialVersionUID = 1L;
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
+
     private Long userId;
+
+    private Long forwardId;
+
+    private String forwardName;
+
+    private Long tunnelId;
+
+    private String tunnelName;
 
     private Long inFlow;
 
@@ -41,6 +39,4 @@ public class StatisticsFlow  {
     private String time;
 
     private Long createdTime;
-
-
 }

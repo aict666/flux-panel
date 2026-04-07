@@ -1,12 +1,22 @@
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Button } from "@heroui/button";
+import { Input } from "@heroui/input";
 import { Modal, ModalContent, ModalHeader, ModalBody } from "@heroui/modal";
 import { useState, useEffect } from "react";
 import toast from 'react-hot-toast';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 
-import { getUserPackageInfo } from "@/api";
+import { getUserPackageInfo, getUserPackageFlowStats } from "@/api";
+import {
+  createDefaultFlowStatsRange,
+  normalizeFlowSeries,
+  sortForwardStats,
+  validateFlowStatsRange,
+  type FlowSeriesPoint,
+  type FlowStatsRangeState,
+  type ForwardFlowStat,
+} from "./dashboard-flow-utils";
 
 interface UserInfo {
   flow: number;
@@ -49,12 +59,13 @@ interface AddressItem {
   copying: boolean;
 }
 
-interface StatisticsFlow {
-  id: number;
-  userId: number;
-  flow: number;
-  totalFlow: number;
-  time: string;
+interface FlowStatsResponse {
+  range: {
+    startTime: number;
+    endTime: number;
+  };
+  series: FlowSeriesPoint[];
+  forwardStats: ForwardFlowStat[];
 }
 
 export default function DashboardPage() {
@@ -62,7 +73,10 @@ export default function DashboardPage() {
   const [userInfo, setUserInfo] = useState<UserInfo>({} as UserInfo);
   const [userTunnels, setUserTunnels] = useState<UserTunnel[]>([]);
   const [forwardList, setForwardList] = useState<Forward[]>([]);
-  const [statisticsFlows, setStatisticsFlows] = useState<StatisticsFlow[]>([]);
+  const [flowSeries, setFlowSeries] = useState<FlowSeriesPoint[]>([]);
+  const [forwardFlowStats, setForwardFlowStats] = useState<ForwardFlowStat[]>([]);
+  const [flowStatsLoading, setFlowStatsLoading] = useState(false);
+  const [flowStatsRange, setFlowStatsRange] = useState<FlowStatsRangeState>(() => createDefaultFlowStatsRange());
   const [isAdmin, setIsAdmin] = useState(false);
   
   const [addressModalOpen, setAddressModalOpen] = useState(false);
@@ -160,40 +174,58 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
+    const defaultRange = createDefaultFlowStatsRange();
+
     // 重置状态并加载数据，防止页面切换时显示旧数据
     setLoading(true);
     setUserInfo({} as UserInfo);
     setUserTunnels([]);
     setForwardList([]);
-    setStatisticsFlows([]);
+    setFlowSeries([]);
+    setForwardFlowStats([]);
+    setFlowStatsRange(defaultRange);
     
     // 检查用户是否是管理员
     const adminStatus = localStorage.getItem('admin');
     setIsAdmin(adminStatus === 'true');
     
-    loadPackageData();
+    loadPackageData(defaultRange);
     localStorage.setItem('e', '/dashboard');
   }, []);
 
-  const loadPackageData = async () => {
+  const loadPackageData = async (range: FlowStatsRangeState) => {
     setLoading(true);
     try {
-      const res = await getUserPackageInfo();
-      if (res.code === 0) {
-        const data = res.data;
+      const [packageRes, flowStatsRes] = await Promise.all([
+        getUserPackageInfo(),
+        getUserPackageFlowStats({
+          startTime: new Date(range.start).getTime(),
+          endTime: new Date(range.end).getTime(),
+        }),
+      ]);
+
+      if (packageRes.code === 0) {
+        const data = packageRes.data;
         setUserInfo(data.userInfo || {});
         setUserTunnels(data.tunnelPermissions || []);
         setForwardList(data.forwards || []);
-        setStatisticsFlows(data.statisticsFlows || []);
         
         // 检查有效期并显示通知
         checkExpirationNotifications(data.userInfo, data.tunnelPermissions || []);
       } else {
-        toast.error(res.msg || '获取套餐信息失败');
+        toast.error(packageRes.msg || '获取套餐信息失败');
+      }
+
+      if (flowStatsRes.code === 0) {
+        const stats = flowStatsRes.data as FlowStatsResponse;
+        setFlowSeries(stats.series || []);
+        setForwardFlowStats(sortForwardStats(stats.forwardStats || []));
+      } else {
+        toast.error(flowStatsRes.msg || '获取流量统计失败');
       }
     } catch (error) {
-      console.error('获取套餐信息失败:', error);
-      toast.error('获取套餐信息失败');
+      console.error('获取仪表盘数据失败:', error);
+      toast.error('获取仪表盘数据失败');
     } finally {
       setLoading(false);
     }
@@ -224,30 +256,34 @@ export default function DashboardPage() {
     return value.toString();
   };
 
-  // 处理24小时流量统计数据
-  const processFlowChartData = () => {
-    // 生成最近24小时的时间数组（从当前小时往前推24小时）
-    const now = new Date();
-    const hours: string[] = [];
-    for (let i = 23; i >= 0; i--) {
-      const time = new Date(now.getTime() - i * 60 * 60 * 1000);
-      const hourString = time.getHours().toString().padStart(2, '0') + ':00';
-      hours.push(hourString);
+  const processFlowChartData = () => normalizeFlowSeries(flowSeries, (value) => formatFlow(value));
+
+  const handleFlowStatsQuery = async () => {
+    const validationError = validateFlowStatsRange(flowStatsRange.start, flowStatsRange.end);
+    if (validationError) {
+      toast.error(validationError);
+      return;
     }
 
-    // 创建数据映射
-    const flowMap = new Map<string, number>();
-    statisticsFlows.forEach(item => {
-      flowMap.set(item.time, item.flow || 0);
-    });
-
-    // 生成图表数据，没有数据的小时显示为0
-    return hours.map(hour => ({
-      time: hour,
-      flow: flowMap.get(hour) || 0,
-      // 格式化显示用的流量值
-      formattedFlow: formatFlow(flowMap.get(hour) || 0)
-    }));
+    setFlowStatsLoading(true);
+    try {
+      const res = await getUserPackageFlowStats({
+        startTime: new Date(flowStatsRange.start).getTime(),
+        endTime: new Date(flowStatsRange.end).getTime(),
+      });
+      if (res.code === 0) {
+        const data = res.data as FlowStatsResponse;
+        setFlowSeries(data.series || []);
+        setForwardFlowStats(sortForwardStats(data.forwardStats || []));
+      } else {
+        toast.error(res.msg || '获取流量统计失败');
+      }
+    } catch (error) {
+      console.error('获取流量统计失败:', error);
+      toast.error('获取流量统计失败');
+    } finally {
+      setFlowStatsLoading(false);
+    }
   };
 
 
@@ -708,19 +744,40 @@ export default function DashboardPage() {
            </Card>
          </div>
 
-         {/* 24小时流量统计图表 */}
+         {/* 流量统计图表 */}
          <Card className="mb-6 lg:mb-8 border border-gray-200 dark:border-default-200 shadow-md">
            <CardHeader className="pb-3">
-             <div className="flex items-center gap-2">
-               <svg className="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 20 20">
-                 <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z" />
-                 <path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z" />
-               </svg>
-               <h2 className="text-lg lg:text-xl font-semibold text-foreground">24小时流量统计</h2>
+             <div className="flex w-full flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+               <div className="flex items-center gap-2">
+                 <svg className="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 20 20">
+                   <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z" />
+                   <path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z" />
+                 </svg>
+                 <h2 className="text-lg lg:text-xl font-semibold text-foreground">流量统计</h2>
+               </div>
+               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,220px)_minmax(0,220px)_auto] lg:items-end">
+                 <Input
+                   type="datetime-local"
+                   label="开始时间"
+                   size="sm"
+                   value={flowStatsRange.start}
+                   onValueChange={(value) => setFlowStatsRange((prev) => ({ ...prev, start: value }))}
+                 />
+                 <Input
+                   type="datetime-local"
+                   label="结束时间"
+                   size="sm"
+                   value={flowStatsRange.end}
+                   onValueChange={(value) => setFlowStatsRange((prev) => ({ ...prev, end: value }))}
+                 />
+                 <Button color="primary" onPress={handleFlowStatsQuery} isLoading={flowStatsLoading}>
+                   查询
+                 </Button>
+               </div>
              </div>
            </CardHeader>
            <CardBody className="pt-0">
-             {statisticsFlows.length === 0 ? (
+             {flowSeries.length === 0 ? (
                <div className="text-center py-12">
                  <svg className="w-12 h-12 text-default-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
@@ -729,14 +786,13 @@ export default function DashboardPage() {
                </div>
              ) : (
                <div className="space-y-4">
-
-                                    {/* 流量趋势图 */}
+                   {/* 流量趋势图 */}
                    <div className="h-64 lg:h-80 w-full">
                      <ResponsiveContainer width="100%" height="100%">
                        <LineChart data={processFlowChartData()}>
                          <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
                          <XAxis 
-                           dataKey="time" 
+                           dataKey="label" 
                            tick={{ fontSize: 12 }}
                            tickLine={false}
                            axisLine={{ stroke: '#e5e7eb', strokeWidth: 1 }}
@@ -756,9 +812,16 @@ export default function DashboardPage() {
                          <Tooltip 
                            content={({ active, payload, label }) => {
                              if (active && payload && payload.length) {
+                               const point = payload[0]?.payload as { inFlow?: number; outFlow?: number };
                                return (
                                  <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3">
                                    <p className="font-medium text-foreground">{`时间: ${label}`}</p>
+                                   <p className="text-default-600">
+                                     {`入站: ${formatFlow(point?.inFlow || 0)}`}
+                                   </p>
+                                   <p className="text-default-600">
+                                     {`出站: ${formatFlow(point?.outFlow || 0)}`}
+                                   </p>
                                    <p className="text-primary">
                                      {`流量: ${formatFlow(payload[0]?.value as number || 0)}`}
                                    </p>
@@ -778,6 +841,43 @@ export default function DashboardPage() {
                          />
                        </LineChart>
                      </ResponsiveContainer>
+                   </div>
+
+                   <div className="overflow-x-auto rounded-xl border border-divider">
+                     <table className="min-w-full divide-y divide-divider bg-content1">
+                       <thead className="bg-default-50">
+                         <tr>
+                           <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">转发</th>
+                           <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">隧道</th>
+                           <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">入口地址</th>
+                           <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">目标地址</th>
+                           <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">入站</th>
+                           <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">出站</th>
+                           <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">总量</th>
+                         </tr>
+                       </thead>
+                       <tbody className="divide-y divide-divider">
+                         {forwardFlowStats.length === 0 ? (
+                           <tr>
+                             <td colSpan={7} className="px-4 py-6 text-center text-sm text-default-500">
+                               当前时间范围内暂无转发流量数据
+                             </td>
+                           </tr>
+                         ) : (
+                           forwardFlowStats.map((item) => (
+                             <tr key={item.id} className="hover:bg-default-50/80">
+                               <td className="px-4 py-3 text-sm font-medium text-foreground">{item.name}</td>
+                               <td className="px-4 py-3 text-sm text-default-600">{item.tunnelName}</td>
+                               <td className="px-4 py-3 text-sm text-default-600">{item.inAddress || "-"}</td>
+                               <td className="px-4 py-3 text-sm text-default-600">{item.remoteAddr || "-"}</td>
+                               <td className="px-4 py-3 text-right text-sm text-default-600">{formatFlow(item.inFlow)}</td>
+                               <td className="px-4 py-3 text-right text-sm text-default-600">{formatFlow(item.outFlow)}</td>
+                               <td className="px-4 py-3 text-right text-sm font-semibold text-foreground">{formatFlow(item.flow)}</td>
+                             </tr>
+                           ))
+                         )}
+                       </tbody>
+                     </table>
                    </div>
                </div>
              )}

@@ -6,6 +6,7 @@ import com.admin.entity.Forward;
 import com.admin.entity.UserTunnel;
 import com.admin.service.ForwardService;
 import com.admin.service.UserTunnelService;
+import com.admin.support.PostgresIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,11 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @SpringBootTest(properties = {
-        "DB_PATH=target/user-tunnel-test.db",
         "LOG_DIR=target/test-logs",
         "JWT_SECRET=test-secret"
 })
-class UserTunnelServiceImplTest {
+class UserTunnelServiceImplTest extends PostgresIntegrationTestSupport {
 
     @Autowired
     private UserTunnelService userTunnelService;

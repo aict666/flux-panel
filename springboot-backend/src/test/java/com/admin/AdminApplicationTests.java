@@ -10,6 +10,7 @@ import com.admin.service.ForwardService;
 import com.admin.service.TunnelService;
 import com.admin.service.UserService;
 import com.admin.service.UserTunnelService;
+import com.admin.support.PostgresIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -20,11 +21,10 @@ import java.util.List;
 
 
 @SpringBootTest(properties = {
-        "DB_PATH=target/test-gost.db",
         "LOG_DIR=target/test-logs",
         "JWT_SECRET=test-secret"
 })
-class AdminApplicationTests {
+class AdminApplicationTests extends PostgresIntegrationTestSupport {
 
 
 

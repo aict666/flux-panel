@@ -26,6 +26,8 @@ public class Tunnel extends BaseEntity {
 
     private Integer type;
 
+    private String protocol;
+
     private int flow;
 
     private BigDecimal trafficRatio;

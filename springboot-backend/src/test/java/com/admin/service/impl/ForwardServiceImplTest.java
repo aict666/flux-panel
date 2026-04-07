@@ -11,6 +11,7 @@ import com.admin.service.ForwardPortService;
 import com.admin.service.ForwardService;
 import com.admin.service.NodeService;
 import com.admin.service.TunnelService;
+import com.admin.support.PostgresIntegrationTestSupport;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,11 +30,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 @SpringBootTest(properties = {
-        "DB_PATH=target/forward-test-gost.db",
         "LOG_DIR=target/test-logs",
         "JWT_SECRET=test-secret"
 })
-class ForwardServiceImplTest {
+class ForwardServiceImplTest extends PostgresIntegrationTestSupport {
 
     @Autowired
     private ForwardService forwardService;
