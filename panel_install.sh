@@ -19,6 +19,7 @@ PANEL_COMPOSE_PROJECT_NAME="${PANEL_COMPOSE_PROJECT_NAME:-flux-panel}"
 PANEL_APP_DIR="${PANEL_APP_DIR:-$HOME/flux-panel}"
 PANEL_ENV_FILE="${PANEL_ENV_FILE:-$PANEL_APP_DIR/.env}"
 PANEL_COMPOSE_FILE="${PANEL_COMPOSE_FILE:-$PANEL_APP_DIR/docker-compose.yml}"
+SQLITE_MIGRATION_MARKER_FILE="${SQLITE_MIGRATION_MARKER_FILE:-$PANEL_APP_DIR/.sqlite-to-postgres-migrated}"
 INITIAL_WORKDIR="${INITIAL_WORKDIR:-$(pwd)}"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
@@ -312,6 +313,13 @@ wait_for_backend() {
 }
 
 run_sqlite_to_postgres_migration() {
+  ensure_app_workdir
+
+  if [[ -f "$SQLITE_MIGRATION_MARKER_FILE" ]]; then
+    echo "ℹ️ 已检测到 SQLite -> PostgreSQL 迁移标记，跳过重复迁移"
+    return 0
+  fi
+
   if ! docker volume inspect "$SQLITE_VOLUME_NAME" >/dev/null 2>&1; then
     echo "ℹ️ 未检测到旧版 sqlite_data 卷，跳过历史数据迁移"
     return 0
@@ -351,6 +359,7 @@ run_sqlite_to_postgres_migration() {
     echo "❌ SQLite -> PostgreSQL 数据迁移失败，退出码: $migration_status"
     return $migration_status
   fi
+  printf 'migrated_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SQLITE_MIGRATION_MARKER_FILE"
   echo "✅ SQLite -> PostgreSQL 迁移完成"
 }
 
@@ -503,7 +512,7 @@ uninstall_panel() {
   run_compose down --rmi all --volumes --remove-orphans
   docker volume rm -f sqlite_data postgres_data backend_logs >/dev/null 2>&1 || true
   echo "🧹 删除配置文件..."
-  rm -f "$PANEL_COMPOSE_FILE" "$PANEL_ENV_FILE"
+  rm -f "$PANEL_COMPOSE_FILE" "$PANEL_ENV_FILE" "$SQLITE_MIGRATION_MARKER_FILE"
   echo "✅ 卸载完成"
 }
 

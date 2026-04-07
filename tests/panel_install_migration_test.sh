@@ -50,6 +50,7 @@ export DB_NAME="flux_panel"
 export DB_USER="flux_panel"
 export DB_PASSWORD="flux_panel"
 export JWT_SECRET="test-secret"
+export SQLITE_MIGRATION_MARKER_FILE="$TMP_DIR/sqlite-postgres-migrated.flag"
 
 source "$SCRIPT_COPY"
 
@@ -82,9 +83,24 @@ run_success_case() {
   output="$(run_sqlite_to_postgres_migration 2>&1)"
 
   [[ "$output" == *"✅ SQLite -> PostgreSQL 迁移完成"* ]]
+  [[ -f "$SQLITE_MIGRATION_MARKER_FILE" ]]
+}
+
+run_skip_case_when_marker_exists() {
+  export FAKE_DOCKER_LOG="$TMP_DIR/docker-skip.log"
+  export FAKE_DOCKER_RUN_EXIT_CODE="0"
+  : > "$FAKE_DOCKER_LOG"
+  : > "$SQLITE_MIGRATION_MARKER_FILE"
+
+  local output
+  output="$(run_sqlite_to_postgres_migration 2>&1)"
+
+  [[ "$output" == *"ℹ️ 已检测到 SQLite -> PostgreSQL 迁移标记，跳过重复迁移"* ]]
+  [[ ! -s "$FAKE_DOCKER_LOG" ]]
 }
 
 run_failure_case
 run_success_case
+run_skip_case_when_marker_exists
 
 echo "panel_install migration tests passed"
