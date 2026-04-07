@@ -7,6 +7,7 @@ import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import org.apache.commons.lang3.StringUtils;
 
+import java.net.URI;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -269,6 +270,20 @@ public class GostUtil {
     public static String processServerAddress(String serverAddr) {
         if (StrUtil.isBlank(serverAddr)) {
             return serverAddr;
+        }
+
+        serverAddr = serverAddr.trim();
+        if (serverAddr.contains("://")) {
+            try {
+                URI uri = URI.create(serverAddr);
+                if (StringUtils.isNotBlank(uri.getHost())) {
+                    int port = uri.getPort();
+                    serverAddr = port >= 0 ? uri.getHost() + ":" + port : uri.getHost();
+                } else if (StringUtils.isNotBlank(uri.getAuthority())) {
+                    serverAddr = uri.getAuthority();
+                }
+            } catch (IllegalArgumentException ignored) {
+            }
         }
 
         // 如果已经被方括号包裹，直接返回

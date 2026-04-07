@@ -47,6 +47,18 @@ class NodeServiceInstallCommandTest {
     }
 
     @Test
+    void shouldStripProtocolAndPathFromConfiguredPanelAddress() {
+        TestableNodeServiceImpl service = new TestableNodeServiceImpl();
+        service.node = buildNode(4L, "secret-d", "agent_d");
+        service.viteConfigService = mockIpConfigService("http://panel.example.com:6365/flow/upload");
+
+        R result = service.getInstallCommand(4L);
+
+        NodeInstallCommandDto dto = assertInstanceOf(NodeInstallCommandDto.class, result.getData());
+        assertTrue(dto.getInstallCommand().contains("./install.sh -n agent_d -a panel.example.com:6365 -s secret-d"));
+    }
+
+    @Test
     void shouldPersistNormalizedServiceNameOnCreateAndUpdate() {
         TestableNodeServiceImpl service = new TestableNodeServiceImpl();
 
