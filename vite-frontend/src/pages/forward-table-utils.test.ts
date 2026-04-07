@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_FORWARD_PAGE_SIZE,
+  FORWARD_PAGE_SIZE_OPTIONS,
   buildForwardTableRows,
   formatForwardTotalFlow,
+  normalizeForwardPageSize,
   paginateForwardRows,
+  retainSelectedForwardIdsOnPage,
 } from "./forward-table-utils";
 
 const sampleForwards = [
@@ -75,5 +79,32 @@ describe("forward-table-utils", () => {
 
     expect(paginateForwardRows(rows, 1, 1).map((row) => row.id)).toEqual([1]);
     expect(paginateForwardRows(rows, 2, 1).map((row) => row.id)).toEqual([2]);
+  });
+
+  it("normalizes page size to supported options with a safe default", () => {
+    expect(FORWARD_PAGE_SIZE_OPTIONS).toEqual([10, 20, 50, 100]);
+    expect(normalizeForwardPageSize(20)).toBe(20);
+    expect(normalizeForwardPageSize("50")).toBe(50);
+    expect(normalizeForwardPageSize(undefined)).toBe(DEFAULT_FORWARD_PAGE_SIZE);
+    expect(normalizeForwardPageSize("15")).toBe(DEFAULT_FORWARD_PAGE_SIZE);
+    expect(normalizeForwardPageSize(0)).toBe(DEFAULT_FORWARD_PAGE_SIZE);
+  });
+
+  it("keeps selected ids scoped to the current page rows", () => {
+    const rows = buildForwardTableRows(sampleForwards, {
+      search: "",
+      status: "all",
+      strategy: "all",
+      tunnelId: "all",
+      userId: "all",
+      multiTargetOnly: false,
+    });
+
+    expect(
+      Array.from(retainSelectedForwardIdsOnPage(new Set([1, 2, 3]), rows.slice(0, 1))),
+    ).toEqual([1]);
+    expect(
+      Array.from(retainSelectedForwardIdsOnPage(new Set([1, 2]), rows.slice(1, 2))),
+    ).toEqual([2]);
   });
 });

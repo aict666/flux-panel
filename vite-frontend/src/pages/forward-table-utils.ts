@@ -43,9 +43,30 @@ export interface ForwardTableRow {
   createdTime: string;
 }
 
+export const FORWARD_PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
+export const DEFAULT_FORWARD_PAGE_SIZE = FORWARD_PAGE_SIZE_OPTIONS[0];
+
 const FLOW_KB = 1024;
 const FLOW_MB = FLOW_KB * 1024;
 const FLOW_GB = FLOW_MB * 1024;
+
+export function normalizeForwardPageSize(
+  value: number | string | null | undefined,
+): number {
+  const parsedValue =
+    typeof value === "string" ? Number.parseInt(value, 10) : value;
+
+  if (
+    typeof parsedValue === "number" &&
+    FORWARD_PAGE_SIZE_OPTIONS.includes(
+      parsedValue as (typeof FORWARD_PAGE_SIZE_OPTIONS)[number],
+    )
+  ) {
+    return parsedValue;
+  }
+
+  return DEFAULT_FORWARD_PAGE_SIZE;
+}
 
 export function formatForwardTotalFlow(forward: Pick<ForwardTableSource, "inFlow" | "outFlow">): string {
   const total = (forward.inFlow || 0) + (forward.outFlow || 0);
@@ -64,6 +85,17 @@ export function paginateForwardRows<T>(rows: T[], page: number, pageSize: number
   const startIndex = (safePage - 1) * safePageSize;
 
   return rows.slice(startIndex, startIndex + safePageSize);
+}
+
+export function retainSelectedForwardIdsOnPage(
+  selectedIds: Iterable<number>,
+  rows: Array<Pick<ForwardTableRow, "id">>,
+): Set<number> {
+  const visibleIds = new Set(rows.map((row) => row.id));
+
+  return new Set(
+    Array.from(selectedIds).filter((selectedId) => visibleIds.has(selectedId)),
+  );
 }
 
 function formatInAddress(inIp: string, port: number): string {

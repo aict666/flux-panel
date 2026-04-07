@@ -8,6 +8,7 @@ import { Chip } from "@heroui/chip";
 import { Spinner } from "@heroui/spinner";
 import { Switch } from "@heroui/switch";
 import { Alert } from "@heroui/alert";
+import { Pagination } from "@heroui/pagination";
 import toast from "react-hot-toast";
 
 import {
@@ -22,10 +23,14 @@ import {
   diagnoseForward,
 } from "@/api";
 import {
+  DEFAULT_FORWARD_PAGE_SIZE,
+  FORWARD_PAGE_SIZE_OPTIONS,
   buildForwardTableRows,
+  normalizeForwardPageSize,
   type ForwardTableFilterState,
   type ForwardTableRow,
   paginateForwardRows,
+  retainSelectedForwardIdsOnPage,
 } from "@/pages/forward-table-utils";
 
 interface Forward {
@@ -92,7 +97,7 @@ interface DiagnosisResult {
   }>;
 }
 
-const PAGE_SIZE = 10;
+const FORWARD_PAGE_SIZE_STORAGE_KEY = "forward-table-page-size";
 
 export default function ForwardPage() {
   const [loading, setLoading] = useState(true);
@@ -107,6 +112,19 @@ export default function ForwardPage() {
   const [userFilter, setUserFilter] = useState<"all" | number>("all");
   const [multiTargetOnly, setMultiTargetOnly] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(() => {
+    if (typeof window === "undefined") {
+      return DEFAULT_FORWARD_PAGE_SIZE;
+    }
+
+    try {
+      return normalizeForwardPageSize(
+        window.localStorage.getItem(FORWARD_PAGE_SIZE_STORAGE_KEY),
+      );
+    } catch {
+      return DEFAULT_FORWARD_PAGE_SIZE;
+    }
+  });
   const [selectedForwardIds, setSelectedForwardIds] = useState<Set<number>>(new Set());
   const [detailForward, setDetailForward] = useState<Forward | null>(null);
   const [batchAction, setBatchAction] = useState<null | "delete" | "pause" | "start">(null);
@@ -186,10 +204,14 @@ export default function ForwardPage() {
   );
 
   const filteredRows = useMemo(() => buildForwardTableRows(forwards, filterState), [forwards, filterState]);
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const pagedRows = useMemo(
-    () => paginateForwardRows(filteredRows, currentPage, PAGE_SIZE),
-    [filteredRows, currentPage],
+    () => paginateForwardRows(filteredRows, currentPage, pageSize),
+    [filteredRows, currentPage, pageSize],
+  );
+  const pagedRowIdSet = useMemo(
+    () => new Set(pagedRows.map((row) => row.id)),
+    [pagedRows],
   );
 
   const userOptions = useMemo(() => {
@@ -206,11 +228,17 @@ export default function ForwardPage() {
   }, [forwards]);
 
   const selectedForwards = useMemo(
-    () => forwards.filter((forward) => selectedForwardIds.has(forward.id)),
-    [forwards, selectedForwardIds],
+    () =>
+      forwards.filter(
+        (forward) =>
+          selectedForwardIds.has(forward.id) && pagedRowIdSet.has(forward.id),
+      ),
+    [forwards, pagedRowIdSet, selectedForwardIds],
   );
 
-  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedForwardIds.has(row.id));
+  const allCurrentPageSelected =
+    pagedRows.length > 0 &&
+    pagedRows.every((row) => selectedForwardIds.has(row.id));
 
   useEffect(() => {
     setCurrentPage((previous) => Math.min(previous, totalPages));
@@ -218,19 +246,40 @@ export default function ForwardPage() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchValue, statusFilter, strategyFilter, tunnelFilter, userFilter, multiTargetOnly]);
+  }, [searchValue, statusFilter, strategyFilter, tunnelFilter, userFilter, multiTargetOnly, pageSize]);
 
   useEffect(() => {
     setSelectedForwardIds((previous) => {
-      const next = new Set<number>();
-      previous.forEach((id) => {
-        if (rawForwardMap.has(id)) {
-          next.add(id);
+      const next = retainSelectedForwardIdsOnPage(previous, pagedRows);
+
+      if (next.size === previous.size) {
+        let unchanged = true;
+
+        previous.forEach((id) => {
+          if (!next.has(id)) {
+            unchanged = false;
+          }
+        });
+
+        if (unchanged) {
+          return previous;
         }
-      });
+      }
+
       return next;
     });
-  }, [rawForwardMap]);
+  }, [pagedRows]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        FORWARD_PAGE_SIZE_STORAGE_KEY,
+        String(pageSize),
+      );
+    } catch {
+      // ignore storage persistence failures in private mode or locked browsers
+    }
+  }, [pageSize]);
 
   const loadData = async (showLoading = true) => {
     setLoading(showLoading);
@@ -840,16 +889,16 @@ export default function ForwardPage() {
     });
   };
 
-  const toggleAllFilteredRows = () => {
+  const toggleAllCurrentPageRows = () => {
     setSelectedForwardIds((previous) => {
-      if (allFilteredSelected) {
+      if (allCurrentPageSelected) {
         const next = new Set(previous);
-        filteredRows.forEach((row) => next.delete(row.id));
+        pagedRows.forEach((row) => next.delete(row.id));
         return next;
       }
 
       const next = new Set(previous);
-      filteredRows.forEach((row) => next.add(row.id));
+      pagedRows.forEach((row) => next.add(row.id));
       return next;
     });
   };
@@ -1259,8 +1308,8 @@ export default function ForwardPage() {
                         <th className="w-12 px-4 py-3">
                           <input
                             type="checkbox"
-                            checked={allFilteredSelected}
-                            onChange={toggleAllFilteredRows}
+                            checked={allCurrentPageSelected}
+                            onChange={toggleAllCurrentPageRows}
                             className="h-4 w-4 rounded border-default-300 text-primary"
                           />
                         </th>
@@ -1354,32 +1403,38 @@ export default function ForwardPage() {
               )}
             </div>
 
-            <div className="flex items-center justify-between rounded-2xl border border-divider bg-content1 px-4 py-3">
-              <Button
-                variant="light"
-                isIconOnly
-                onPress={() => setCurrentPage((previous) => Math.max(1, previous - 1))}
-                isDisabled={currentPage === 1}
-              >
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m15 19-7-7 7-7" />
-                </svg>
-              </Button>
+            <div className="flex flex-col gap-3 rounded-2xl border border-divider bg-content1 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <Select
+                  aria-label="每页条数"
+                  className="max-w-[140px]"
+                  selectedKeys={[String(pageSize)]}
+                  size="sm"
+                  variant="bordered"
+                  onSelectionChange={(keys) => {
+                    const key = Array.from(keys)[0] as string;
 
-              <div className="text-sm font-medium text-default-600">
-                Page {currentPage} of {totalPages}
+                    setPageSize(normalizeForwardPageSize(key));
+                  }}
+                >
+                  {FORWARD_PAGE_SIZE_OPTIONS.map((option) => (
+                    <SelectItem key={String(option)}>{option} / 页</SelectItem>
+                  ))}
+                </Select>
+
+                <div className="text-sm text-default-500">
+                  共 {filteredRows.length} 条，当前页 {pagedRows.length} 条
+                </div>
               </div>
 
-              <Button
-                variant="light"
-                isIconOnly
-                onPress={() => setCurrentPage((previous) => Math.min(totalPages, previous + 1))}
-                isDisabled={currentPage === totalPages}
-              >
-                <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m9 5 7 7-7 7" />
-                </svg>
-              </Button>
+              <Pagination
+                showControls
+                className="justify-end"
+                page={currentPage}
+                size="sm"
+                total={totalPages}
+                onChange={setCurrentPage}
+              />
             </div>
           </CardBody>
         </Card>
