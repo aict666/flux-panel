@@ -24,13 +24,25 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 
 
 @Slf4j
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements UserService {
+
+    private static final long HOUR_MILLIS = ChronoUnit.HOURS.getDuration().toMillis();
+    private static final long MAX_FLOW_STATS_RANGE_MILLIS = ChronoUnit.DAYS.getDuration().toMillis() * 30;
+    private static final DateTimeFormatter LEGACY_HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
+    private static final DateTimeFormatter RANGE_HOUR_FORMATTER = DateTimeFormatter.ofPattern("MM-dd HH:mm");
 
     @Resource
     @Lazy
@@ -55,6 +67,9 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Resource
     StatisticsFlowService statisticsFlowService;
+
+    @Resource
+    ForwardStatisticsFlowService forwardStatisticsFlowService;
 
     @Resource
     @Lazy
@@ -143,6 +158,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         forwardService.remove(new QueryWrapper<Forward>().eq("user_id", id));
         userTunnelService.remove(new QueryWrapper<UserTunnel>().eq("user_id", id));
         statisticsFlowService.remove(new QueryWrapper<StatisticsFlow>().eq("user_id", id));
+        forwardStatisticsFlowService.remove(new QueryWrapper<ForwardStatisticsFlow>().eq("user_id", id));
         this.removeById(id);
         return R.ok();
     }
@@ -163,6 +179,35 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         packageDto.setForwards(forwards);
         packageDto.setStatisticsFlows(statisticsFlows);
         return R.ok(packageDto);
+    }
+
+    @Override
+    public R getUserPackageFlowStats(FlowStatsQueryDto flowStatsQueryDto) {
+        if (flowStatsQueryDto.getEndTime() <= flowStatsQueryDto.getStartTime()) {
+            return R.err("结束时间必须大于开始时间");
+        }
+        if (flowStatsQueryDto.getEndTime() - flowStatsQueryDto.getStartTime() > MAX_FLOW_STATS_RANGE_MILLIS) {
+            return R.err("统计时间范围不能超过30天");
+        }
+
+        Integer userId = JwtUtil.getUserIdFromToken();
+        User user = this.getById(userId);
+        if (user == null) {
+            return R.err("用户不存在");
+        }
+
+        NormalizedRange range = normalizeRange(flowStatsQueryDto.getStartTime(), flowStatsQueryDto.getEndTime());
+        List<UserPackageDto.UserForwardDetailDto> forwards = userMapper.getUserForwardDetails(user.getId().intValue());
+        fillForwardInIpAndPort(forwards);
+
+        UserPackageFlowStatsDto result = new UserPackageFlowStatsDto();
+        UserPackageFlowStatsDto.RangeDto rangeDto = new UserPackageFlowStatsDto.RangeDto();
+        rangeDto.setStartTime(range.startTime);
+        rangeDto.setEndTime(range.endTime);
+        result.setRange(rangeDto);
+        result.setSeries(buildSeries(user.getId(), range));
+        result.setForwardStats(buildForwardStats(user.getId(), range, forwards));
+        return R.ok(result);
     }
 
     @Override
@@ -226,38 +271,41 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     private List<StatisticsFlow> getLast24HoursFlowStatistics(Long userId) {
+        long endTime = truncateToHour(System.currentTimeMillis());
+        long startTime = endTime - 23 * HOUR_MILLIS;
         List<StatisticsFlow> recentFlows = statisticsFlowService.list(
                 new QueryWrapper<StatisticsFlow>()
                         .eq("user_id", userId)
-                        .orderByDesc("id")
-                        .last("LIMIT 24")
+                        .between("hour_time", startTime, endTime)
+                        .orderByAsc("hour_time")
         );
-        List<StatisticsFlow> result = new ArrayList<>(recentFlows);
-        if (result.size() < 24) {
-            int startHour = java.time.LocalDateTime.now().getHour();
-            if (!result.isEmpty()) {
-                String lastTime = result.getLast().getTime();
-                startHour = parseHour(lastTime) - 1;
+
+        Map<Long, StatisticsFlow> flowMap = new LinkedHashMap<>();
+        for (StatisticsFlow statisticsFlow : recentFlows) {
+            flowMap.put(statisticsFlow.getHourTime(), statisticsFlow);
+        }
+
+        List<StatisticsFlow> result = new ArrayList<>();
+        for (long cursor = startTime; cursor <= endTime; cursor += HOUR_MILLIS) {
+            StatisticsFlow statisticsFlow = flowMap.get(cursor);
+            if (statisticsFlow == null) {
+                statisticsFlow = new StatisticsFlow();
+                statisticsFlow.setUserId(userId);
+                statisticsFlow.setHourTime(cursor);
+                statisticsFlow.setTime(formatHour(cursor, LEGACY_HOUR_FORMATTER));
+                statisticsFlow.setInFlow(0L);
+                statisticsFlow.setOutFlow(0L);
+                statisticsFlow.setFlow(0L);
+                statisticsFlow.setTotalInFlow(0L);
+                statisticsFlow.setTotalOutFlow(0L);
+                statisticsFlow.setTotalFlow(0L);
+                statisticsFlow.setCreatedTime(cursor);
+            } else if (statisticsFlow.getTime() == null || statisticsFlow.getTime().trim().isEmpty()) {
+                statisticsFlow.setTime(formatHour(cursor, LEGACY_HOUR_FORMATTER));
             }
-            while (result.size() < 24) {
-                if (startHour < 0) startHour = 23;
-                StatisticsFlow emptyFlow = new StatisticsFlow();
-                emptyFlow.setUserId(userId);
-                emptyFlow.setFlow(0L);
-                emptyFlow.setTotalFlow(0L);
-                emptyFlow.setTime(String.format("%02d:00", startHour));
-                result.add(emptyFlow);
-                startHour--;
-            }
+            result.add(statisticsFlow);
         }
         return result;
-    }
-
-    private int parseHour(String timeStr) {
-        if (timeStr != null && timeStr.contains(":")) {
-            return Integer.parseInt(timeStr.split(":")[0]);
-        }
-        return java.time.LocalDateTime.now().getHour();
     }
 
     private void fillForwardInIpAndPort(List<UserPackageDto.UserForwardDetailDto> forwards) {
@@ -320,6 +368,117 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             if (!ipPortSet.isEmpty()) {
                 forward.setInIp(String.join(",", ipPortSet));
             }
+        }
+    }
+
+    private List<UserPackageFlowStatsDto.SeriesPointDto> buildSeries(Long userId, NormalizedRange range) {
+        List<StatisticsFlow> flowList = statisticsFlowService.list(
+                new QueryWrapper<StatisticsFlow>()
+                        .eq("user_id", userId)
+                        .between("hour_time", range.startTime, range.endTime)
+                        .orderByAsc("hour_time")
+        );
+        Map<Long, StatisticsFlow> flowMap = new LinkedHashMap<>();
+        for (StatisticsFlow statisticsFlow : flowList) {
+            flowMap.put(statisticsFlow.getHourTime(), statisticsFlow);
+        }
+
+        List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>();
+        for (long cursor = range.startTime; cursor <= range.endTime; cursor += HOUR_MILLIS) {
+            StatisticsFlow statisticsFlow = flowMap.get(cursor);
+            UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
+            point.setHourTime(cursor);
+            point.setTime(formatHour(cursor, RANGE_HOUR_FORMATTER));
+            if (statisticsFlow == null) {
+                point.setInFlow(0L);
+                point.setOutFlow(0L);
+                point.setFlow(0L);
+            } else {
+                point.setInFlow(defaultLong(statisticsFlow.getInFlow()));
+                point.setOutFlow(defaultLong(statisticsFlow.getOutFlow()));
+                point.setFlow(defaultLong(statisticsFlow.getFlow()));
+            }
+            result.add(point);
+        }
+        return result;
+    }
+
+    private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildForwardStats(Long userId,
+                                                                                NormalizedRange range,
+                                                                                List<UserPackageDto.UserForwardDetailDto> forwards) {
+        Map<Long, UserPackageDto.UserForwardDetailDto> forwardMap = new LinkedHashMap<>();
+        for (UserPackageDto.UserForwardDetailDto forward : forwards) {
+            forwardMap.put(forward.getId(), forward);
+        }
+
+        Map<Long, UserPackageFlowStatsDto.ForwardFlowStatsDto> aggregated = new LinkedHashMap<>();
+        List<ForwardStatisticsFlow> flowList = forwardStatisticsFlowService.list(
+                new QueryWrapper<ForwardStatisticsFlow>()
+                        .eq("user_id", userId)
+                        .between("hour_time", range.startTime, range.endTime)
+        );
+
+        for (ForwardStatisticsFlow statisticsFlow : flowList) {
+            if (statisticsFlow.getForwardId() == null) {
+                continue;
+            }
+            UserPackageDto.UserForwardDetailDto forward = forwardMap.get(statisticsFlow.getForwardId());
+            if (forward == null) {
+                continue;
+            }
+            UserPackageFlowStatsDto.ForwardFlowStatsDto dto = aggregated.computeIfAbsent(statisticsFlow.getForwardId(), key -> {
+                UserPackageFlowStatsDto.ForwardFlowStatsDto item = new UserPackageFlowStatsDto.ForwardFlowStatsDto();
+                item.setId(forward.getId());
+                item.setName(forward.getName());
+                item.setTunnelId(forward.getTunnelId());
+                item.setTunnelName(forward.getTunnelName());
+                item.setInAddress(forward.getInIp());
+                item.setRemoteAddr(forward.getRemoteAddr());
+                item.setInFlow(0L);
+                item.setOutFlow(0L);
+                item.setFlow(0L);
+                return item;
+            });
+            dto.setInFlow(dto.getInFlow() + defaultLong(statisticsFlow.getInFlow()));
+            dto.setOutFlow(dto.getOutFlow() + defaultLong(statisticsFlow.getOutFlow()));
+            dto.setFlow(dto.getFlow() + defaultLong(statisticsFlow.getFlow()));
+        }
+
+        return aggregated.values().stream()
+                .sorted(Comparator.comparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).reversed()
+                        .thenComparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getId))
+                .toList();
+    }
+
+    private NormalizedRange normalizeRange(long startTime, long endTime) {
+        return new NormalizedRange(truncateToHour(startTime), truncateToHour(endTime));
+    }
+
+    private long truncateToHour(long timestamp) {
+        return Instant.ofEpochMilli(timestamp)
+                .atZone(ZoneId.systemDefault())
+                .truncatedTo(ChronoUnit.HOURS)
+                .toInstant()
+                .toEpochMilli();
+    }
+
+    private String formatHour(long timestamp, DateTimeFormatter formatter) {
+        return Instant.ofEpochMilli(timestamp)
+                .atZone(ZoneId.systemDefault())
+                .format(formatter);
+    }
+
+    private long defaultLong(Long value) {
+        return value == null ? 0L : value;
+    }
+
+    private static final class NormalizedRange {
+        private final long startTime;
+        private final long endTime;
+
+        private NormalizedRange(long startTime, long endTime) {
+            this.startTime = startTime;
+            this.endTime = endTime;
         }
     }
 

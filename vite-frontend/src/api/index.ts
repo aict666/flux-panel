@@ -22,6 +22,7 @@ export const getAllUsers = (pageData: any = {}) => Network.post("/user/list", pa
 export const updateUser = (data: any) => Network.post("/user/update", data);
 export const deleteUser = (id: number) => Network.post("/user/delete", { id });
 export const getUserPackageInfo = () => Network.post("/user/package");
+export const getUserPackageFlowStats = (data: { startTime: number; endTime: number }) => Network.post("/user/package/flow-stats", data);
 
 // 节点CRUD操作 - 全部使用POST请求
 export const createNode = (data: any) => Network.post("/node/create", data);

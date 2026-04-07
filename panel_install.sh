@@ -10,6 +10,11 @@ export LC_ALL=C
 # 全局下载地址配置
 DOCKER_COMPOSEV4_URL="https://github.com/aict666/flux-panel/releases/latest/download/docker-compose-v4.yml"
 DOCKER_COMPOSEV6_URL="https://github.com/aict666/flux-panel/releases/latest/download/docker-compose-v6.yml"
+POSTGRES_CONTAINER_NAME="flux-postgres"
+SQLITE_VOLUME_NAME="sqlite_data"
+BACKEND_LOGS_VOLUME_NAME="backend_logs"
+DEFAULT_DB_NAME="flux_panel"
+DEFAULT_DB_USER="flux_panel"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
@@ -155,6 +160,129 @@ generate_random() {
   LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c16
 }
 
+load_env_file() {
+  if [[ -f ".env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source ./.env
+    set +a
+  fi
+}
+
+ensure_postgres_env() {
+  DB_HOST=${DB_HOST:-postgres}
+  DB_PORT=${DB_PORT:-5432}
+  DB_NAME=${DB_NAME:-$DEFAULT_DB_NAME}
+  DB_USER=${DB_USER:-$DEFAULT_DB_USER}
+  DB_PASSWORD=${DB_PASSWORD:-$(generate_random)}
+}
+
+write_env_file() {
+  cat > .env <<EOF
+JWT_SECRET=$JWT_SECRET
+FRONTEND_PORT=$FRONTEND_PORT
+BACKEND_PORT=$BACKEND_PORT
+DB_HOST=$DB_HOST
+DB_PORT=$DB_PORT
+DB_NAME=$DB_NAME
+DB_USER=$DB_USER
+DB_PASSWORD=$DB_PASSWORD
+EOF
+}
+
+get_backend_image() {
+  awk '
+    /^  backend:$/ { in_backend=1; next }
+    in_backend && /^  [A-Za-z0-9_-]+:$/ { in_backend=0 }
+    in_backend && /^    image:/ { print $2; exit }
+  ' docker-compose.yml
+}
+
+wait_for_postgres() {
+  echo "🔍 检查 PostgreSQL 服务状态..."
+  for i in {1..60}; do
+    if docker ps --format "{{.Names}}" | grep -q "^${POSTGRES_CONTAINER_NAME}$"; then
+      if docker exec "$POSTGRES_CONTAINER_NAME" pg_isready -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1; then
+        echo "✅ PostgreSQL 服务已就绪"
+        return 0
+      fi
+    fi
+    if [ $i -eq 60 ]; then
+      echo "❌ PostgreSQL 启动超时（60秒）"
+      return 1
+    fi
+    if [ $((i % 10)) -eq 1 ]; then
+      echo "⏳ 等待 PostgreSQL 启动... ($i/60)"
+    fi
+    sleep 1
+  done
+}
+
+wait_for_backend() {
+  echo "🔍 检查后端服务状态..."
+  for i in {1..90}; do
+    if docker ps --format "{{.Names}}" | grep -q "^springboot-backend$"; then
+      BACKEND_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' springboot-backend 2>/dev/null || echo "unknown")
+      if [[ "$BACKEND_HEALTH" == "healthy" ]]; then
+        echo "✅ 后端服务健康检查通过"
+        return 0
+      fi
+      if [[ "$BACKEND_HEALTH" == "unhealthy" ]]; then
+        echo "⚠️ 后端健康状态：$BACKEND_HEALTH"
+      fi
+    else
+      BACKEND_HEALTH="not_running"
+    fi
+    if [ $i -eq 90 ]; then
+      echo "❌ 后端服务启动超时（90秒）"
+      echo "🔍 当前状态：$(docker inspect -f '{{.State.Health.Status}}' springboot-backend 2>/dev/null || echo '容器不存在')"
+      return 1
+    fi
+    if [ $((i % 15)) -eq 1 ]; then
+      echo "⏳ 等待后端服务启动... ($i/90) 状态：${BACKEND_HEALTH:-unknown}"
+    fi
+    sleep 1
+  done
+}
+
+run_sqlite_to_postgres_migration() {
+  if ! docker volume inspect "$SQLITE_VOLUME_NAME" >/dev/null 2>&1; then
+    echo "ℹ️ 未检测到旧版 sqlite_data 卷，跳过历史数据迁移"
+    return 0
+  fi
+
+  local backend_image
+  backend_image=$(get_backend_image)
+  if [[ -z "$backend_image" ]]; then
+    echo "❌ 无法从 docker-compose.yml 解析后端镜像"
+    return 1
+  fi
+
+  if ! docker run --rm --entrypoint sh -v "${SQLITE_VOLUME_NAME}:/sqlite-import:ro" "$backend_image" -c 'test -f /sqlite-import/gost.db' >/dev/null 2>&1; then
+    echo "ℹ️ sqlite_data 卷中未找到 gost.db，跳过历史数据迁移"
+    return 0
+  fi
+
+  echo "🔄 执行 SQLite -> PostgreSQL 数据迁移..."
+  docker run --rm \
+    --network gost-network \
+    --env-file .env \
+    -e DB_HOST=postgres \
+    -e DB_PORT="$DB_PORT" \
+    -e DB_NAME="$DB_NAME" \
+    -e DB_USER="$DB_USER" \
+    -e DB_PASSWORD="$DB_PASSWORD" \
+    -e JWT_SECRET="$JWT_SECRET" \
+    -e LOG_DIR=/app/logs \
+    -e APP_MIGRATION_MODE=sqlite-to-postgres \
+    -e SQLITE_IMPORT_PATH=/sqlite-import/gost.db \
+    -e APP_MIGRATION_EXIT_AFTER_RUN=true \
+    -v "${SQLITE_VOLUME_NAME}:/sqlite-import:ro" \
+    -v "${BACKEND_LOGS_VOLUME_NAME}:/app/logs" \
+    "$backend_image"
+  echo "✅ SQLite -> PostgreSQL 迁移完成"
+}
+
 # 删除脚本自身
 delete_self() {
   echo ""
@@ -178,6 +306,7 @@ get_config_params() {
 
   # 生成JWT密钥
   JWT_SECRET=$(generate_random)
+  ensure_postgres_env
 }
 
 # 安装功能
@@ -198,14 +327,13 @@ install_panel() {
     configure_docker_ipv6
   fi
 
-  cat > .env <<EOF
-JWT_SECRET=$JWT_SECRET
-FRONTEND_PORT=$FRONTEND_PORT
-BACKEND_PORT=$BACKEND_PORT
-EOF
+  write_env_file
 
   echo "🚀 启动 docker 服务..."
   $DOCKER_CMD up -d
+
+  wait_for_postgres
+  wait_for_backend
 
   echo "🎉 部署完成"
   echo "🌐 访问地址: http://服务器IP:$FRONTEND_PORT"
@@ -221,6 +349,11 @@ EOF
 update_panel() {
   echo "🔄 开始更新面板..."
   check_docker
+  load_env_file
+  FRONTEND_PORT=${FRONTEND_PORT:-6366}
+  BACKEND_PORT=${BACKEND_PORT:-6365}
+  JWT_SECRET=${JWT_SECRET:-$(generate_random)}
+  ensure_postgres_env
 
   echo "🔽 下载最新配置文件..."
   DOCKER_COMPOSE_URL=$(get_docker_compose_url)
@@ -234,56 +367,36 @@ update_panel() {
     configure_docker_ipv6
   fi
 
-  # 先发送 SIGTERM 信号，让应用优雅关闭
-  docker stop -t 30 springboot-backend 2>/dev/null || true
-  docker stop -t 10 vite-frontend 2>/dev/null || true
-  
-  # 等待 WAL 文件同步
-  echo "⏳ 等待数据同步..."
-  sleep 5
-  
-  # 然后再完全停止
-  $DOCKER_CMD down
+  write_env_file
 
   echo "⬇️ 拉取最新镜像..."
   $DOCKER_CMD pull
 
+  # 先发送 SIGTERM 信号，让应用优雅关闭
+  docker stop -t 30 springboot-backend 2>/dev/null || true
+  docker stop -t 10 vite-frontend 2>/dev/null || true
+  
+  echo "⏳ 等待旧版 SQLite 数据同步..."
+  sleep 5
+
+  echo "🚀 启动 PostgreSQL 服务..."
+  $DOCKER_CMD up -d postgres
+  wait_for_postgres
+
+  if ! run_sqlite_to_postgres_migration; then
+    echo "❌ 数据迁移失败，已终止升级。原 sqlite_data 卷已保留，可用于回滚。"
+    return 1
+  fi
+
   echo "🚀 启动更新后的服务..."
-  $DOCKER_CMD up -d
+  $DOCKER_CMD up -d backend frontend
 
   # 等待服务启动
   echo "⏳ 等待服务启动..."
-
-  # 检查后端容器健康状态
-  echo "🔍 检查后端服务状态..."
-  for i in {1..90}; do
-    if docker ps --format "{{.Names}}" | grep -q "^springboot-backend$"; then
-      BACKEND_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' springboot-backend 2>/dev/null || echo "unknown")
-      if [[ "$BACKEND_HEALTH" == "healthy" ]]; then
-        echo "✅ 后端服务健康检查通过"
-        break
-      elif [[ "$BACKEND_HEALTH" == "starting" ]]; then
-        # 继续等待
-        :
-      elif [[ "$BACKEND_HEALTH" == "unhealthy" ]]; then
-        echo "⚠️ 后端健康状态：$BACKEND_HEALTH"
-      fi
-    else
-      echo "⚠️ 后端容器未找到或未运行"
-      BACKEND_HEALTH="not_running"
-    fi
-    if [ $i -eq 90 ]; then
-      echo "❌ 后端服务启动超时（90秒）"
-      echo "🔍 当前状态：$(docker inspect -f '{{.State.Health.Status}}' springboot-backend 2>/dev/null || echo '容器不存在')"
-      echo "🛑 更新终止"
-      return 1
-    fi
-    # 每15秒显示一次进度
-    if [ $((i % 15)) -eq 1 ]; then
-      echo "⏳ 等待后端服务启动... ($i/90) 状态：${BACKEND_HEALTH:-unknown}"
-    fi
-    sleep 1
-  done
+  wait_for_backend || {
+    echo "🛑 更新终止"
+    return 1
+  }
 
   echo "✅ 更新完成"
 }
@@ -311,6 +424,7 @@ uninstall_panel() {
 
   echo "🛑 停止并删除容器、镜像、卷..."
   $DOCKER_CMD down --rmi all --volumes --remove-orphans
+  docker volume rm -f sqlite_data postgres_data backend_logs >/dev/null 2>&1 || true
   echo "🧹 删除配置文件..."
   rm -f docker-compose.yml .env
   echo "✅ 卸载完成"
