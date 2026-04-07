@@ -10,10 +10,12 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import javax.sql.DataSource;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -89,9 +91,48 @@ class SqliteToPostgresMigrationServiceTest {
         }
     }
 
+    @Test
+    void shouldMigrateReadOnlyWalSqliteData() throws Exception {
+        Path sqliteDir = Files.createTempDirectory("flux-migration-readonly");
+        Path sqliteFile = sqliteDir.resolve("gost.db");
+        prepareSqliteFixture(sqliteFile);
+        setReadOnlyFixture(sqliteDir, sqliteFile);
+
+        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")) {
+            postgres.start();
+            DataSource dataSource = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+            try (Connection connection = dataSource.getConnection()) {
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("data.sql"));
+            }
+
+            SqliteToPostgresMigrationService migrationService = new SqliteToPostgresMigrationService(dataSource);
+            migrationService.migrate(sqliteFile.toString());
+
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                ResultSet userResult = statement.executeQuery("SELECT username FROM users WHERE id = 1");
+                userResult.next();
+                assertEquals("admin_user", userResult.getString("username"));
+
+                ResultSet forwardResult = statement.executeQuery("SELECT COUNT(*) FROM forward WHERE id = 11");
+                forwardResult.next();
+                assertEquals(1, forwardResult.getInt(1));
+            }
+        } finally {
+            resetWritableFixture(sqliteDir, sqliteFile);
+            deleteIfExists(sqliteDir.resolve("gost.db-shm"));
+            deleteIfExists(sqliteDir.resolve("gost.db-wal"));
+            deleteIfExists(sqliteFile);
+            deleteIfExists(sqliteDir);
+        }
+    }
+
     private void prepareSqliteFixture(Path sqliteFile) throws Exception {
         try (Connection sqliteConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile)) {
             try (Statement statement = sqliteConnection.createStatement()) {
+                statement.execute("PRAGMA journal_mode=WAL");
                 statement.execute("""
                         CREATE TABLE user (
                           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -232,7 +273,64 @@ class SqliteToPostgresMigrationServiceTest {
                 statement.execute("INSERT INTO forward (id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx) VALUES (11, 1, 'admin_user', 'forward-a', 7, '8.8.8.8:53', 'fifo', 10, 20, 1, 1, 1, 0)");
                 statement.execute("INSERT INTO forward_port (id, forward_id, node_id, port) VALUES (12, 11, 5, 18080)");
                 statement.execute("INSERT INTO statistics_flow (id, user_id, flow, total_flow, time, created_time) VALUES (13, 1, 30, 30, '10:00', 1710000000000)");
+                statement.execute("PRAGMA wal_checkpoint(TRUNCATE)");
             }
+        }
+    }
+
+    private void setReadOnlyFixture(Path sqliteDir, Path sqliteFile) throws Exception {
+        makeReadOnly(sqliteFile);
+        Path walFile = sqliteDir.resolve("gost.db-wal");
+        Path shmFile = sqliteDir.resolve("gost.db-shm");
+        if (Files.exists(walFile)) {
+            makeReadOnly(walFile);
+        }
+        if (Files.exists(shmFile)) {
+            makeReadOnly(shmFile);
+        }
+        Files.setPosixFilePermissions(sqliteDir, Set.of(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_EXECUTE
+        ));
+    }
+
+    private void resetWritableFixture(Path sqliteDir, Path sqliteFile) throws Exception {
+        if (Files.exists(sqliteDir)) {
+            Files.setPosixFilePermissions(sqliteDir, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE
+            ));
+        }
+        if (Files.exists(sqliteFile)) {
+            Files.setPosixFilePermissions(sqliteFile, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE
+            ));
+        }
+        Path walFile = sqliteDir.resolve("gost.db-wal");
+        Path shmFile = sqliteDir.resolve("gost.db-shm");
+        if (Files.exists(walFile)) {
+            Files.setPosixFilePermissions(walFile, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE
+            ));
+        }
+        if (Files.exists(shmFile)) {
+            Files.setPosixFilePermissions(shmFile, Set.of(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE
+            ));
+        }
+    }
+
+    private void makeReadOnly(Path path) throws Exception {
+        Files.setPosixFilePermissions(path, Set.of(PosixFilePermission.OWNER_READ));
+    }
+
+    private void deleteIfExists(Path path) throws Exception {
+        if (Files.exists(path)) {
+            Files.delete(path);
         }
     }
 }
