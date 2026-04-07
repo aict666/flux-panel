@@ -15,6 +15,11 @@ SQLITE_VOLUME_NAME="sqlite_data"
 BACKEND_LOGS_VOLUME_NAME="backend_logs"
 DEFAULT_DB_NAME="flux_panel"
 DEFAULT_DB_USER="flux_panel"
+PANEL_COMPOSE_PROJECT_NAME="${PANEL_COMPOSE_PROJECT_NAME:-flux-panel}"
+PANEL_APP_DIR="${PANEL_APP_DIR:-$HOME/flux-panel}"
+PANEL_ENV_FILE="${PANEL_ENV_FILE:-$PANEL_APP_DIR/.env}"
+PANEL_COMPOSE_FILE="${PANEL_COMPOSE_FILE:-$PANEL_APP_DIR/docker-compose.yml}"
+INITIAL_WORKDIR="${INITIAL_WORKDIR:-$(pwd)}"
 
 COUNTRY=$(curl -s https://ipinfo.io/country)
 if [ "$COUNTRY" = "CN" ]; then
@@ -160,13 +165,73 @@ generate_random() {
   LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c16
 }
 
+copy_runtime_file_if_missing() {
+  local source_path="$1"
+  local target_path="$2"
+  if [[ -f "$source_path" && ! -f "$target_path" ]]; then
+    cp "$source_path" "$target_path"
+  fi
+}
+
+ensure_app_workdir() {
+  mkdir -p "$PANEL_APP_DIR"
+  copy_runtime_file_if_missing "$INITIAL_WORKDIR/.env" "$PANEL_ENV_FILE"
+  copy_runtime_file_if_missing "$INITIAL_WORKDIR/docker-compose.yml" "$PANEL_COMPOSE_FILE"
+}
+
+download_compose_file() {
+  local compose_url="$1"
+  ensure_app_workdir
+  curl -L -o "$PANEL_COMPOSE_FILE" "$compose_url"
+}
+
+run_compose() {
+  ensure_app_workdir
+  if [[ ! -f "$PANEL_COMPOSE_FILE" ]]; then
+    echo "❌ 未找到面板配置文件：$PANEL_COMPOSE_FILE"
+    return 1
+  fi
+
+  if [[ "$DOCKER_CMD" == "docker-compose" ]]; then
+    COMPOSE_PROJECT_NAME="$PANEL_COMPOSE_PROJECT_NAME" docker-compose --project-directory "$PANEL_APP_DIR" -f "$PANEL_COMPOSE_FILE" "$@"
+  else
+    COMPOSE_PROJECT_NAME="$PANEL_COMPOSE_PROJECT_NAME" docker compose --project-directory "$PANEL_APP_DIR" -f "$PANEL_COMPOSE_FILE" "$@"
+  fi
+}
+
+get_container_env_var() {
+  local container_name="$1"
+  local env_key="$2"
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container_name" 2>/dev/null | \
+    awk -F= -v key="$env_key" '$1 == key { print substr($0, index($0, "=") + 1) }' | tail -n 1 || true
+}
+
+get_container_host_port() {
+  local container_name="$1"
+  local container_port="$2"
+  docker port "$container_name" "$container_port" 2>/dev/null | head -n 1 | sed 's/.*://' || true
+}
+
+hydrate_env_from_running_containers() {
+  FRONTEND_PORT=${FRONTEND_PORT:-$(get_container_host_port vite-frontend "80/tcp")}
+  BACKEND_PORT=${BACKEND_PORT:-$(get_container_host_port springboot-backend "6365/tcp")}
+  JWT_SECRET=${JWT_SECRET:-$(get_container_env_var springboot-backend "JWT_SECRET")}
+  DB_HOST=${DB_HOST:-$(get_container_env_var springboot-backend "DB_HOST")}
+  DB_PORT=${DB_PORT:-$(get_container_env_var springboot-backend "DB_PORT")}
+  DB_NAME=${DB_NAME:-$(get_container_env_var "$POSTGRES_CONTAINER_NAME" "POSTGRES_DB")}
+  DB_USER=${DB_USER:-$(get_container_env_var "$POSTGRES_CONTAINER_NAME" "POSTGRES_USER")}
+  DB_PASSWORD=${DB_PASSWORD:-$(get_container_env_var "$POSTGRES_CONTAINER_NAME" "POSTGRES_PASSWORD")}
+}
+
 load_env_file() {
-  if [[ -f ".env" ]]; then
+  ensure_app_workdir
+  if [[ -f "$PANEL_ENV_FILE" ]]; then
     set -a
     # shellcheck disable=SC1091
-    source ./.env
+    source "$PANEL_ENV_FILE"
     set +a
   fi
+  hydrate_env_from_running_containers
 }
 
 ensure_postgres_env() {
@@ -178,7 +243,8 @@ ensure_postgres_env() {
 }
 
 write_env_file() {
-  cat > .env <<EOF
+  ensure_app_workdir
+  cat > "$PANEL_ENV_FILE" <<EOF
 JWT_SECRET=$JWT_SECRET
 FRONTEND_PORT=$FRONTEND_PORT
 BACKEND_PORT=$BACKEND_PORT
@@ -195,7 +261,7 @@ get_backend_image() {
     /^  backend:$/ { in_backend=1; next }
     in_backend && /^  [A-Za-z0-9_-]+:$/ { in_backend=0 }
     in_backend && /^    image:/ { print $2; exit }
-  ' docker-compose.yml
+  ' "$PANEL_COMPOSE_FILE"
 }
 
 wait_for_postgres() {
@@ -267,7 +333,7 @@ run_sqlite_to_postgres_migration() {
   local migration_status=0
   docker run --rm \
     --network gost-network \
-    --env-file .env \
+    --env-file "$PANEL_ENV_FILE" \
     -e DB_HOST=postgres \
     -e DB_PORT="$DB_PORT" \
     -e DB_NAME="$DB_NAME" \
@@ -318,12 +384,14 @@ get_config_params() {
 install_panel() {
   echo "🚀 开始安装面板..."
   check_docker
+  ensure_app_workdir
   get_config_params
+  echo "📁 面板工作目录：$PANEL_APP_DIR"
 
   echo "🔽 下载必要文件..."
   DOCKER_COMPOSE_URL=$(get_docker_compose_url)
   echo "📡 选择配置文件：$(basename "$DOCKER_COMPOSE_URL")"
-  curl -L -o docker-compose.yml "$DOCKER_COMPOSE_URL"
+  download_compose_file "$DOCKER_COMPOSE_URL"
   echo "✅ 文件准备完成"
 
   # 自动检测并配置 IPv6 支持
@@ -335,7 +403,7 @@ install_panel() {
   write_env_file
 
   echo "🚀 启动 docker 服务..."
-  $DOCKER_CMD up -d
+  run_compose up -d
 
   wait_for_postgres
   wait_for_backend
@@ -354,16 +422,18 @@ install_panel() {
 update_panel() {
   echo "🔄 开始更新面板..."
   check_docker
+  ensure_app_workdir
   load_env_file
   FRONTEND_PORT=${FRONTEND_PORT:-6366}
   BACKEND_PORT=${BACKEND_PORT:-6365}
   JWT_SECRET=${JWT_SECRET:-$(generate_random)}
   ensure_postgres_env
+  echo "📁 面板工作目录：$PANEL_APP_DIR"
 
   echo "🔽 下载最新配置文件..."
   DOCKER_COMPOSE_URL=$(get_docker_compose_url)
   echo "📡 选择配置文件：$(basename "$DOCKER_COMPOSE_URL")"
-  curl -L -o docker-compose.yml "$DOCKER_COMPOSE_URL"
+  download_compose_file "$DOCKER_COMPOSE_URL"
   echo "✅ 下载完成"
 
   # 自动检测并配置 IPv6 支持
@@ -375,7 +445,7 @@ update_panel() {
   write_env_file
 
   echo "⬇️ 拉取最新镜像..."
-  $DOCKER_CMD pull
+  run_compose pull
 
   # 先发送 SIGTERM 信号，让应用优雅关闭
   docker stop -t 30 springboot-backend 2>/dev/null || true
@@ -385,7 +455,7 @@ update_panel() {
   sleep 5
 
   echo "🚀 启动 PostgreSQL 服务..."
-  $DOCKER_CMD up -d postgres
+  run_compose up -d postgres
   wait_for_postgres
 
   if ! run_sqlite_to_postgres_migration; then
@@ -394,7 +464,7 @@ update_panel() {
   fi
 
   echo "🚀 启动更新后的服务..."
-  $DOCKER_CMD up -d backend frontend
+  run_compose up -d backend frontend
 
   # 等待服务启动
   echo "⏳ 等待服务启动..."
@@ -412,12 +482,14 @@ update_panel() {
 uninstall_panel() {
   echo "🗑️ 开始卸载面板..."
   check_docker
+  ensure_app_workdir
+  echo "📁 面板工作目录：$PANEL_APP_DIR"
 
-  if [[ ! -f "docker-compose.yml" ]]; then
+  if [[ ! -f "$PANEL_COMPOSE_FILE" ]]; then
     echo "⚠️ 未找到 docker-compose.yml 文件，正在下载以完成卸载..."
     DOCKER_COMPOSE_URL=$(get_docker_compose_url)
     echo "📡 选择配置文件：$(basename "$DOCKER_COMPOSE_URL")"
-    curl -L -o docker-compose.yml "$DOCKER_COMPOSE_URL"
+    download_compose_file "$DOCKER_COMPOSE_URL"
     echo "✅ docker-compose.yml 下载完成"
   fi
 
@@ -428,10 +500,10 @@ uninstall_panel() {
   fi
 
   echo "🛑 停止并删除容器、镜像、卷..."
-  $DOCKER_CMD down --rmi all --volumes --remove-orphans
+  run_compose down --rmi all --volumes --remove-orphans
   docker volume rm -f sqlite_data postgres_data backend_logs >/dev/null 2>&1 || true
   echo "🧹 删除配置文件..."
-  rm -f docker-compose.yml .env
+  rm -f "$PANEL_COMPOSE_FILE" "$PANEL_ENV_FILE"
   echo "✅ 卸载完成"
 }
 
