@@ -264,6 +264,7 @@ run_sqlite_to_postgres_migration() {
   fi
 
   echo "🔄 执行 SQLite -> PostgreSQL 数据迁移..."
+  local migration_status=0
   docker run --rm \
     --network gost-network \
     --env-file .env \
@@ -279,7 +280,11 @@ run_sqlite_to_postgres_migration() {
     -e APP_MIGRATION_EXIT_AFTER_RUN=true \
     -v "${SQLITE_VOLUME_NAME}:/sqlite-import:ro" \
     -v "${BACKEND_LOGS_VOLUME_NAME}:/app/logs" \
-    "$backend_image"
+    "$backend_image" || migration_status=$?
+  if [[ $migration_status -ne 0 ]]; then
+    echo "❌ SQLite -> PostgreSQL 数据迁移失败，退出码: $migration_status"
+    return $migration_status
+  fi
   echo "✅ SQLite -> PostgreSQL 迁移完成"
 }
 
