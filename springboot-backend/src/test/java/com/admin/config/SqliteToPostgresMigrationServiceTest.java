@@ -92,6 +92,32 @@ class SqliteToPostgresMigrationServiceTest {
     }
 
     @Test
+    void shouldMigrateNodeInstallServiceNameWhenPresentInLegacySqlite() throws Exception {
+        Path sqliteFile = Files.createTempFile("flux-migration-install-service", ".db");
+        prepareSqliteFixture(sqliteFile, true);
+
+        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")) {
+            postgres.start();
+            DataSource dataSource = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+            try (Connection connection = dataSource.getConnection()) {
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("data.sql"));
+            }
+
+            SqliteToPostgresMigrationService migrationService = new SqliteToPostgresMigrationService(dataSource);
+            migrationService.migrate(sqliteFile.toString());
+
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                ResultSet nodeResult = statement.executeQuery("SELECT install_service_name FROM node WHERE id = 5");
+                nodeResult.next();
+                assertEquals("flux-node", nodeResult.getString("install_service_name"));
+            }
+        }
+    }
+
+    @Test
     void shouldMigrateReadOnlyWalSqliteData() throws Exception {
         Path sqliteDir = Files.createTempDirectory("flux-migration-readonly");
         Path sqliteFile = sqliteDir.resolve("gost.db");
@@ -130,6 +156,10 @@ class SqliteToPostgresMigrationServiceTest {
     }
 
     private void prepareSqliteFixture(Path sqliteFile) throws Exception {
+        prepareSqliteFixture(sqliteFile, false);
+    }
+
+    private void prepareSqliteFixture(Path sqliteFile, boolean includeInstallServiceName) throws Exception {
         try (Connection sqliteConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile)) {
             try (Statement statement = sqliteConnection.createStatement()) {
                 statement.execute("PRAGMA journal_mode=WAL");
@@ -164,7 +194,10 @@ class SqliteToPostgresMigrationServiceTest {
                           name VARCHAR(100) NOT NULL,
                           secret VARCHAR(100) NOT NULL,
                           server_ip VARCHAR(100) NOT NULL,
-                          port TEXT NOT NULL,
+                          port TEXT NOT NULL,""" +
+                        (includeInstallServiceName ? """
+                          install_service_name VARCHAR(100),
+                        """ : "") + """
                           interface_name VARCHAR(200),
                           version VARCHAR(100),
                           http INTEGER NOT NULL DEFAULT 0,
@@ -267,7 +300,9 @@ class SqliteToPostgresMigrationServiceTest {
                         """);
                 statement.execute("INSERT INTO user (id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status) VALUES (1, 'admin_user', 'pwd', 0, 2727251700000, 99999, 0, 0, 1, 99999, 1748914865000, 1754011744252, 1)");
                 statement.execute("INSERT INTO vite_config (id, name, value, time) VALUES (1, 'app_name', 'flux', 1755147963000)");
-                statement.execute("INSERT INTO node (id, name, secret, server_ip, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr) VALUES (5, 'node-a', 'secret-a', '1.1.1.1', '1000-1001', '', '', 0, 0, 0, 1, 1, 1, '[::]', '[::]')");
+                statement.execute(includeInstallServiceName
+                        ? "INSERT INTO node (id, name, secret, server_ip, port, install_service_name, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr) VALUES (5, 'node-a', 'secret-a', '1.1.1.1', '1000-1001', 'flux-node', '', '', 0, 0, 0, 1, 1, 1, '[::]', '[::]')"
+                        : "INSERT INTO node (id, name, secret, server_ip, port, interface_name, version, http, tls, socks, created_time, updated_time, status, tcp_listen_addr, udp_listen_addr) VALUES (5, 'node-a', 'secret-a', '1.1.1.1', '1000-1001', '', '', 0, 0, 0, 1, 1, 1, '[::]', '[::]')");
                 statement.execute("INSERT INTO tunnel (id, name, traffic_ratio, type, protocol, flow, created_time, updated_time, status, in_ip) VALUES (7, 'tunnel-a', 1.0, 2, 'tcp', 1, 1, 1, 1, '1.2.3.4')");
                 statement.execute("INSERT INTO chain_tunnel (id, tunnel_id, chain_type, node_id, port, strategy, inx, protocol) VALUES (9, 7, 1, 5, NULL, NULL, NULL, 'tcp')");
                 statement.execute("INSERT INTO forward (id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx) VALUES (11, 1, 'admin_user', 'forward-a', 7, '8.8.8.8:53', 'fifo', 10, 20, 1, 1, 1, 0)");
