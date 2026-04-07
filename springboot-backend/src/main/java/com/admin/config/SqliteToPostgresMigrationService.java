@@ -78,11 +78,16 @@ public class SqliteToPostgresMigrationService {
     private boolean targetHasExistingData(Connection postgresConnection) throws SQLException {
         try (Statement statement = postgresConnection.createStatement();
              ResultSet resultSet = statement.executeQuery("""
-                     SELECT EXISTS (SELECT 1 FROM "user" LIMIT 1)
-                         OR EXISTS (SELECT 1 FROM node LIMIT 1)
+                     SELECT EXISTS (SELECT 1 FROM node LIMIT 1)
                          OR EXISTS (SELECT 1 FROM tunnel LIMIT 1)
+                         OR EXISTS (SELECT 1 FROM chain_tunnel LIMIT 1)
                          OR EXISTS (SELECT 1 FROM forward LIMIT 1)
-                         OR EXISTS (SELECT 1 FROM statistics_flow LIMIT 1) AS has_data
+                         OR EXISTS (SELECT 1 FROM forward_port LIMIT 1)
+                         OR EXISTS (SELECT 1 FROM speed_limit LIMIT 1)
+                         OR EXISTS (SELECT 1 FROM user_tunnel LIMIT 1)
+                         OR EXISTS (SELECT 1 FROM statistics_flow LIMIT 1)
+                         OR EXISTS (SELECT 1 FROM forward_statistics_flow LIMIT 1)
+                         AS has_data
                      """)) {
             return resultSet.next() && resultSet.getBoolean("has_data");
         }
@@ -99,7 +104,7 @@ public class SqliteToPostgresMigrationService {
                 """);
              ResultSet resultSet = query.executeQuery();
              PreparedStatement insert = postgresConnection.prepareStatement("""
-                     INSERT INTO "user" (id, user, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
+                     INSERT INTO users (id, username, pwd, role_id, exp_time, flow, in_flow, out_flow, flow_reset_time, num, created_time, updated_time, status)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT (id) DO NOTHING
                      """)) {
@@ -454,7 +459,7 @@ public class SqliteToPostgresMigrationService {
     }
 
     private void resetSequences(Connection postgresConnection) throws SQLException {
-        resetSequence(postgresConnection, "\"user\"", "public.\"user\"");
+        resetSequence(postgresConnection, "users", "public.users");
         resetSequence(postgresConnection, "vite_config", "public.vite_config");
         resetSequence(postgresConnection, "node", "public.node");
         resetSequence(postgresConnection, "tunnel", "public.tunnel");

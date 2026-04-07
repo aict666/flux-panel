@@ -23,6 +23,73 @@ class SqliteToPostgresMigrationServiceTest {
     @Test
     void shouldMigrateSqliteDataAndRemainIdempotent() throws Exception {
         Path sqliteFile = Files.createTempFile("flux-migration-test", ".db");
+        prepareSqliteFixture(sqliteFile);
+
+        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")) {
+            postgres.start();
+            DataSource dataSource = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+            try (Connection connection = dataSource.getConnection()) {
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("data.sql"));
+            }
+
+            SqliteToPostgresMigrationService migrationService = new SqliteToPostgresMigrationService(dataSource);
+            migrationService.migrate(sqliteFile.toString());
+            migrationService.migrate(sqliteFile.toString());
+
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                ResultSet userResult = statement.executeQuery("SELECT username FROM users WHERE id = 1");
+                userResult.next();
+                assertEquals("admin_user", userResult.getString("username"));
+
+                ResultSet nodeResult = statement.executeQuery("SELECT COUNT(*) FROM node WHERE id = 5");
+                nodeResult.next();
+                assertEquals(1, nodeResult.getInt(1));
+
+                ResultSet forwardResult = statement.executeQuery("SELECT COUNT(*) FROM forward WHERE id = 11");
+                forwardResult.next();
+                assertEquals(1, forwardResult.getInt(1));
+
+                ResultSet statsResult = statement.executeQuery("SELECT flow, total_flow FROM statistics_flow WHERE id = 13");
+                statsResult.next();
+                assertEquals(30, statsResult.getLong("flow"));
+                assertEquals(30, statsResult.getLong("total_flow"));
+            }
+        }
+    }
+
+    @Test
+    void shouldMigrateIntoEmptyPostgresSchemaWhenTablesAlreadyExist() throws Exception {
+        Path sqliteFile = Files.createTempFile("flux-migration-empty-schema", ".db");
+        prepareSqliteFixture(sqliteFile);
+
+        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")) {
+            postgres.start();
+            DataSource dataSource = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
+
+            try (Connection connection = dataSource.getConnection()) {
+                ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
+            }
+
+            SqliteToPostgresMigrationService migrationService = new SqliteToPostgresMigrationService(dataSource);
+            migrationService.migrate(sqliteFile.toString());
+
+            try (Connection connection = dataSource.getConnection();
+                 Statement statement = connection.createStatement()) {
+                ResultSet userCountResult = statement.executeQuery("SELECT COUNT(*) FROM users WHERE id = 1");
+                userCountResult.next();
+                assertEquals(1, userCountResult.getInt(1));
+
+                ResultSet statsCountResult = statement.executeQuery("SELECT COUNT(*) FROM statistics_flow WHERE id = 13");
+                statsCountResult.next();
+                assertEquals(1, statsCountResult.getInt(1));
+            }
+        }
+    }
+
+    private void prepareSqliteFixture(Path sqliteFile) throws Exception {
         try (Connection sqliteConnection = DriverManager.getConnection("jdbc:sqlite:" + sqliteFile)) {
             try (Statement statement = sqliteConnection.createStatement()) {
                 statement.execute("""
@@ -165,36 +232,6 @@ class SqliteToPostgresMigrationServiceTest {
                 statement.execute("INSERT INTO forward (id, user_id, user_name, name, tunnel_id, remote_addr, strategy, in_flow, out_flow, created_time, updated_time, status, inx) VALUES (11, 1, 'admin_user', 'forward-a', 7, '8.8.8.8:53', 'fifo', 10, 20, 1, 1, 1, 0)");
                 statement.execute("INSERT INTO forward_port (id, forward_id, node_id, port) VALUES (12, 11, 5, 18080)");
                 statement.execute("INSERT INTO statistics_flow (id, user_id, flow, total_flow, time, created_time) VALUES (13, 1, 30, 30, '10:00', 1710000000000)");
-            }
-        }
-
-        try (PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16-alpine")) {
-            postgres.start();
-            DataSource dataSource = new DriverManagerDataSource(postgres.getJdbcUrl(), postgres.getUsername(), postgres.getPassword());
-
-            try (Connection connection = dataSource.getConnection()) {
-                ScriptUtils.executeSqlScript(connection, new ClassPathResource("schema.sql"));
-                ScriptUtils.executeSqlScript(connection, new ClassPathResource("data.sql"));
-            }
-
-            SqliteToPostgresMigrationService migrationService = new SqliteToPostgresMigrationService(dataSource);
-            migrationService.migrate(sqliteFile.toString());
-            migrationService.migrate(sqliteFile.toString());
-
-            try (Connection connection = dataSource.getConnection();
-                 Statement statement = connection.createStatement()) {
-                ResultSet nodeResult = statement.executeQuery("SELECT COUNT(*) FROM node WHERE id = 5");
-                nodeResult.next();
-                assertEquals(1, nodeResult.getInt(1));
-
-                ResultSet forwardResult = statement.executeQuery("SELECT COUNT(*) FROM forward WHERE id = 11");
-                forwardResult.next();
-                assertEquals(1, forwardResult.getInt(1));
-
-                ResultSet statsResult = statement.executeQuery("SELECT flow, total_flow FROM statistics_flow WHERE id = 13");
-                statsResult.next();
-                assertEquals(30, statsResult.getLong("flow"));
-                assertEquals(30, statsResult.getLong("total_flow"));
             }
         }
     }
