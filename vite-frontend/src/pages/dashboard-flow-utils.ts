@@ -135,6 +135,10 @@ export function getForwardStatsHeading(rankingMode: FlowStatsRankingMode | null 
   return rankingMode === "all" ? "当前时间段全部规则" : "当前时间段 Top 10 规则";
 }
 
+export function getHourDetailHeading(): string {
+  return "选中小时规则消耗";
+}
+
 export function shouldShowForwardOwner(scope: FlowStatsScope): boolean {
   return scope === "global";
 }

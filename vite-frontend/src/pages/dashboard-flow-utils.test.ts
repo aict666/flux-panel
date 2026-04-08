@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildHourDetailCacheKey,
   createDefaultFlowStatsRange,
+  getHourDetailHeading,
   getForwardStatsHeading,
   normalizeFlowSeries,
   resolveHourTimeFromChartInteraction,
@@ -82,6 +83,7 @@ describe("dashboard-flow-utils", () => {
   it("returns role-specific rule table labels", () => {
     expect(getForwardStatsHeading("top10")).toBe("当前时间段 Top 10 规则");
     expect(getForwardStatsHeading("all")).toBe("当前时间段全部规则");
+    expect(getHourDetailHeading()).toBe("选中小时规则消耗");
     expect(shouldCollapseForwardStatsByDefault("top10")).toBe(false);
     expect(shouldCollapseForwardStatsByDefault("all")).toBe(true);
     expect(shouldShowForwardOwner("self")).toBe(false);

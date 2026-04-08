@@ -1,7 +1,6 @@
 package com.admin.common.task;
 
 import com.admin.common.dto.*;
-import com.admin.common.lang.R;
 import com.admin.common.utils.GostUtil;
 import com.admin.entity.*;
 import com.admin.service.*;
@@ -41,8 +40,11 @@ public class CheckGostConfigAsync {
      * 清理孤立的Gost配置项
      */
     @Async
-    public void cleanNodeConfigs(String node_id, GostConfigDto gostConfig) {
-        Node node = nodeService.getById(node_id);
+    public void cleanNodeConfigs(Long nodeId, GostConfigDto gostConfig) {
+        if (nodeId == null || gostConfig == null) {
+            return;
+        }
+        Node node = nodeService.getById(nodeId);
         if (node != null) {
             cleanOrphanedServices(gostConfig.getServices(), node);
             cleanOrphanedChains(gostConfig.getChains(), node);
@@ -57,35 +59,29 @@ public class CheckGostConfigAsync {
         if (configItems == null) return;
         for (ConfigItem service : configItems) {
             safeExecute(() -> {
+                RuntimeServiceRef serviceRef = parseRuntimeServiceRef(service.getName());
+                if (serviceRef == null) {
+                    return;
+                }
 
-                if (!Objects.equals(service.getName(), "web_api")){
-                    List<String> serviceIds = parseServiceName(service.getName());
+                JSONArray services = new JSONArray();
+                if (serviceRef.kind == RuntimeServiceKind.TUNNEL_TLS) {
+                    services.add(serviceRef.baseServiceName + "_tls");
 
-                    JSONArray services = new JSONArray();
-                    if (Objects.equals(serviceIds.getLast(), "tls")){
-                        String forward_id = serviceIds.getFirst();
-                        services.add(forward_id + "_tls");
-
-                        Tunnel tunnel = tunnelService.getById(forward_id);
-                        if (tunnel == null) {
-                            GostUtil.DeleteService(node.getId(), services);
-                            log.info("删除孤立的服务: {} (节点: {})", service.getName(), node.getId());
-                        }
-
+                    Tunnel tunnel = tunnelService.getById(serviceRef.targetId);
+                    if (tunnel == null) {
+                        GostUtil.DeleteService(node.getId(), services);
+                        log.info("删除孤立的服务: {} (节点: {})", service.getName(), node.getId());
                     }
+                    return;
+                }
 
-                    if (Objects.equals(serviceIds.getLast(), "tcp")){
-                        String forward_id = serviceIds.getFirst();
-                        services.add(forward_id + "_" + serviceIds.get(1) + "_" + serviceIds.get(2) + "_tcp");
-                        services.add(forward_id + "_" + serviceIds.get(1) + "_" + serviceIds.get(2) + "_udp");
-
-                        Forward forward = forwardService.getById(forward_id);
-                        if (forward == null) {
-                            GostUtil.DeleteService(node.getId(), services);
-                            log.info("删除孤立的服务: {} (节点: {})", service.getName(), node.getId());
-                        }
-                    }
-
+                services.add(serviceRef.baseServiceName + "_tcp");
+                services.add(serviceRef.baseServiceName + "_udp");
+                Forward forward = forwardService.getById(serviceRef.targetId);
+                if (forward == null) {
+                    GostUtil.DeleteService(node.getId(), services);
+                    log.info("删除孤立的服务: {} (节点: {})", service.getName(), node.getId());
                 }
             }, "清理服务 " + service.getName());
         }
@@ -99,8 +95,11 @@ public class CheckGostConfigAsync {
         if (configItems == null) return;
         for (ConfigItem chain : configItems) {
             safeExecute(() -> {
-                List<String>  serviceIds = parseServiceName(chain.getName());
-                Tunnel tunnel = tunnelService.getById(serviceIds.getLast());
+                Long tunnelId = parseChainTunnelId(chain.getName());
+                if (tunnelId == null) {
+                    return;
+                }
+                Tunnel tunnel = tunnelService.getById(tunnelId);
                 if (tunnel == null) {
                     GostUtil.DeleteChains(node.getId(), chain.getName());
                     log.info("删除孤立的链: {} (节点: {})", chain.getName(), node.getId());
@@ -118,9 +117,13 @@ public class CheckGostConfigAsync {
 
         for (ConfigItem limiter : configItems) {
             safeExecute(() -> {
-                SpeedLimit speedLimit = speedLimitService.getById(limiter.getName());
+                Long limiterId = parseLongId(limiter.getName(), "限流器", limiter.getName());
+                if (limiterId == null) {
+                    return;
+                }
+                SpeedLimit speedLimit = speedLimitService.getById(limiterId);
                 if (speedLimit == null) {
-                    GostUtil.DeleteLimiters(node.getId(), Long.parseLong(limiter.getName()));
+                    GostUtil.DeleteLimiters(node.getId(), limiterId);
                     log.info("删除孤立的限流器: {} (节点: {})", limiter.getName(), node.getId());
                 }
             }, "清理限流器 " + limiter.getName());
@@ -146,5 +149,67 @@ public class CheckGostConfigAsync {
     private List<String> parseServiceName(String serviceName) {
         String[] split = serviceName.split("_");
         return new ArrayList<>(Arrays.asList(split));
+    }
+
+    private RuntimeServiceRef parseRuntimeServiceRef(String serviceName) {
+        if (Objects.equals(serviceName, "web_api")) {
+            return null;
+        }
+
+        List<String> serviceIds = parseServiceName(serviceName);
+        if (serviceIds.size() == 2 && Objects.equals(serviceIds.getLast(), "tls")) {
+            Long tunnelId = parseLongId(serviceIds.getFirst(), "TLS 服务", serviceName);
+            if (tunnelId == null) {
+                return null;
+            }
+            return new RuntimeServiceRef(RuntimeServiceKind.TUNNEL_TLS, tunnelId, tunnelId.toString());
+        }
+
+        if (serviceIds.size() == 4 && (Objects.equals(serviceIds.getLast(), "tcp") || Objects.equals(serviceIds.getLast(), "udp"))) {
+            Long forwardId = parseLongId(serviceIds.getFirst(), "转发服务", serviceName);
+            if (forwardId == null) {
+                return null;
+            }
+            String baseServiceName = forwardId + "_" + serviceIds.get(1) + "_" + serviceIds.get(2);
+            return new RuntimeServiceRef(RuntimeServiceKind.FORWARD_STREAM, forwardId, baseServiceName);
+        }
+
+        log.info("跳过无法解析的服务配置项: {}", serviceName);
+        return null;
+    }
+
+    private Long parseChainTunnelId(String chainName) {
+        List<String> serviceIds = parseServiceName(chainName);
+        if (serviceIds.size() != 2 || !Objects.equals(serviceIds.getFirst(), "chains")) {
+            log.info("跳过无法解析的链配置项: {}", chainName);
+            return null;
+        }
+        return parseLongId(serviceIds.getLast(), "链", chainName);
+    }
+
+    private Long parseLongId(String rawId, String configType, String originalName) {
+        try {
+            return Long.parseLong(rawId);
+        } catch (NumberFormatException e) {
+            log.info("跳过无法解析的{}配置项: {}", configType, originalName);
+            return null;
+        }
+    }
+
+    private enum RuntimeServiceKind {
+        TUNNEL_TLS,
+        FORWARD_STREAM
+    }
+
+    private static final class RuntimeServiceRef {
+        private final RuntimeServiceKind kind;
+        private final Long targetId;
+        private final String baseServiceName;
+
+        private RuntimeServiceRef(RuntimeServiceKind kind, Long targetId, String baseServiceName) {
+            this.kind = kind;
+            this.targetId = targetId;
+            this.baseServiceName = baseServiceName;
+        }
     }
 }

@@ -207,10 +207,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
 
         NormalizedRange range = normalizeRange(flowStatsQueryDto.getStartTime(), flowStatsQueryDto.getEndTime());
+        long currentHour = truncateToHour(System.currentTimeMillis());
         List<UserPackageDto.UserForwardDetailDto> forwards = loadForwardDetails(adminScope, user.getId());
         fillForwardInIpAndPort(forwards);
-        List<UserPackageFlowStatsDto.SeriesPointDto> series = buildSeries(adminScope ? null : user.getId(), range);
-        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> allForwardStats = buildForwardStats(adminScope ? null : user.getId(), range, forwards);
+        List<UserPackageFlowStatsDto.SeriesPointDto> series = buildSeries(adminScope ? null : user.getId(), range, currentHour);
+        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> allForwardStats = buildForwardStats(adminScope ? null : user.getId(), range, forwards, currentHour);
         List<UserPackageFlowStatsDto.ForwardFlowStatsDto> visibleForwardStats = adminScope
                 ? allForwardStats
                 : allForwardStats.stream().limit(USER_FORWARD_STATS_LIMIT).toList();
@@ -249,13 +250,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
         NormalizedRange range = normalizeRange(flowStatsHourDetailQueryDto.getStartTime(), flowStatsHourDetailQueryDto.getEndTime());
         long hourTime = truncateToHour(flowStatsHourDetailQueryDto.getHourTime());
+        long currentHour = truncateToHour(System.currentTimeMillis());
         if (hourTime < range.startTime || hourTime > range.endTime) {
             return R.err("小时必须位于统计时间范围内");
         }
 
         List<UserPackageDto.UserForwardDetailDto> forwards = loadForwardDetails(adminScope, user.getId());
         fillForwardInIpAndPort(forwards);
-        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> rows = buildHourDetailRows(adminScope ? null : user.getId(), hourTime, forwards);
+        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> rows = buildHourDetailRows(adminScope ? null : user.getId(), hourTime, forwards, currentHour);
 
         UserPackageFlowHourDetailDto result = new UserPackageFlowHourDetailDto();
         UserPackageFlowHourDetailDto.HourDto hourDto = new UserPackageFlowHourDetailDto.HourDto();
@@ -451,15 +453,13 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
     }
 
-    private List<UserPackageFlowStatsDto.SeriesPointDto> buildSeries(Long userId, NormalizedRange range) {
-        QueryWrapper<StatisticsFlow> queryWrapper = new QueryWrapper<StatisticsFlow>()
-                .between("hour_time", range.startTime, range.endTime)
-                .orderByAsc("hour_time");
-        if (userId != null) {
-            queryWrapper.eq("user_id", userId);
-        }
-
-        List<StatisticsFlow> flowList = statisticsFlowService.list(queryWrapper);
+    private List<UserPackageFlowStatsDto.SeriesPointDto> buildSeries(Long userId, NormalizedRange range, long currentHour) {
+        boolean includeRealtimeCurrentHour = rangeContainsHour(range, currentHour);
+        List<StatisticsFlow> flowList = loadHistoricalUserBuckets(
+                userId,
+                range.startTime,
+                includeRealtimeCurrentHour ? currentHour - HOUR_MILLIS : range.endTime
+        );
         Map<Long, UserPackageFlowStatsDto.SeriesPointDto> flowMap = new LinkedHashMap<>();
         for (StatisticsFlow statisticsFlow : flowList) {
             if (statisticsFlow.getHourTime() == null) {
@@ -481,7 +481,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
         List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>();
         for (long cursor = range.startTime; cursor <= range.endTime; cursor += HOUR_MILLIS) {
-            UserPackageFlowStatsDto.SeriesPointDto point = flowMap.get(cursor);
+            UserPackageFlowStatsDto.SeriesPointDto point;
+            if (includeRealtimeCurrentHour && cursor == currentHour) {
+                point = buildRealtimeSeriesPoint(userId, currentHour);
+            } else {
+                point = flowMap.get(cursor);
+            }
             if (point == null) {
                 point = new UserPackageFlowStatsDto.SeriesPointDto();
                 point.setHourTime(cursor);
@@ -497,24 +502,196 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildForwardStats(Long userId,
                                                                                 NormalizedRange range,
-                                                                                List<UserPackageDto.UserForwardDetailDto> forwards) {
-        QueryWrapper<ForwardStatisticsFlow> queryWrapper = new QueryWrapper<ForwardStatisticsFlow>()
-                .between("hour_time", range.startTime, range.endTime);
-        if (userId != null) {
-            queryWrapper.eq("user_id", userId);
+                                                                                List<UserPackageDto.UserForwardDetailDto> forwards,
+                                                                                long currentHour) {
+        boolean includeRealtimeCurrentHour = rangeContainsHour(range, currentHour);
+        List<ForwardStatisticsFlow> flowList = new ArrayList<>(loadHistoricalForwardBuckets(
+                userId,
+                range.startTime,
+                includeRealtimeCurrentHour ? currentHour - HOUR_MILLIS : range.endTime
+        ));
+        if (includeRealtimeCurrentHour) {
+            flowList.addAll(buildRealtimeCurrentHourForwardBuckets(userId, currentHour, forwards));
         }
-        return aggregateForwardStats(forwardStatisticsFlowService.list(queryWrapper), forwards);
+        return aggregateForwardStats(flowList, forwards);
     }
 
     private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildHourDetailRows(Long userId,
                                                                                   long hourTime,
-                                                                                  List<UserPackageDto.UserForwardDetailDto> forwards) {
+                                                                                  List<UserPackageDto.UserForwardDetailDto> forwards,
+                                                                                  long currentHour) {
+        if (hourTime == currentHour) {
+            return aggregateForwardStats(buildRealtimeCurrentHourForwardBuckets(userId, currentHour, forwards), forwards);
+        }
         QueryWrapper<ForwardStatisticsFlow> queryWrapper = new QueryWrapper<ForwardStatisticsFlow>()
                 .eq("hour_time", hourTime);
         if (userId != null) {
             queryWrapper.eq("user_id", userId);
         }
         return aggregateForwardStats(forwardStatisticsFlowService.list(queryWrapper), forwards);
+    }
+
+    private List<StatisticsFlow> loadHistoricalUserBuckets(Long userId, long startTime, long endTime) {
+        if (endTime < startTime) {
+            return new ArrayList<>();
+        }
+        QueryWrapper<StatisticsFlow> queryWrapper = new QueryWrapper<StatisticsFlow>()
+                .between("hour_time", startTime, endTime)
+                .orderByAsc("hour_time");
+        if (userId != null) {
+            queryWrapper.eq("user_id", userId);
+        }
+        return statisticsFlowService.list(queryWrapper);
+    }
+
+    private List<ForwardStatisticsFlow> loadHistoricalForwardBuckets(Long userId, long startTime, long endTime) {
+        if (endTime < startTime) {
+            return new ArrayList<>();
+        }
+        QueryWrapper<ForwardStatisticsFlow> queryWrapper = new QueryWrapper<ForwardStatisticsFlow>()
+                .between("hour_time", startTime, endTime);
+        if (userId != null) {
+            queryWrapper.eq("user_id", userId);
+        }
+        return forwardStatisticsFlowService.list(queryWrapper);
+    }
+
+    private UserPackageFlowStatsDto.SeriesPointDto buildRealtimeSeriesPoint(Long userId, long hourTime) {
+        List<User> users = loadRealtimeUsers(userId);
+        Map<Long, StatisticsFlow> latestBuckets = loadLatestUserBucketsBefore(hourTime, users);
+
+        long totalInFlow = 0L;
+        long totalOutFlow = 0L;
+        for (User currentUser : users) {
+            StatisticsFlow latestBucket = latestBuckets.get(currentUser.getId());
+            totalInFlow += calculateIncrement(defaultLong(currentUser.getInFlow()), latestBucket == null ? null : latestBucket.getTotalInFlow());
+            totalOutFlow += calculateIncrement(defaultLong(currentUser.getOutFlow()), latestBucket == null ? null : latestBucket.getTotalOutFlow());
+        }
+
+        UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
+        point.setHourTime(hourTime);
+        point.setTime(formatHour(hourTime, RANGE_HOUR_FORMATTER));
+        point.setInFlow(totalInFlow);
+        point.setOutFlow(totalOutFlow);
+        point.setFlow(totalInFlow + totalOutFlow);
+        return point;
+    }
+
+    private List<User> loadRealtimeUsers(Long userId) {
+        if (userId != null) {
+            User currentUser = this.getById(userId);
+            if (currentUser == null) {
+                return new ArrayList<>();
+            }
+            return List.of(currentUser);
+        }
+        return this.list(new QueryWrapper<User>().gt("id", 0));
+    }
+
+    private Map<Long, StatisticsFlow> loadLatestUserBucketsBefore(long hourTime, List<User> users) {
+        List<Long> userIds = users.stream()
+                .map(User::getId)
+                .filter(Objects::nonNull)
+                .toList();
+        if (userIds.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        List<StatisticsFlow> historicalBuckets = statisticsFlowService.list(
+                new QueryWrapper<StatisticsFlow>()
+                        .lt("hour_time", hourTime)
+                        .in("user_id", userIds)
+                        .orderByDesc("hour_time")
+        );
+        Map<Long, StatisticsFlow> latestBuckets = new LinkedHashMap<>();
+        for (StatisticsFlow bucket : historicalBuckets) {
+            if (bucket.getUserId() != null && !latestBuckets.containsKey(bucket.getUserId())) {
+                latestBuckets.put(bucket.getUserId(), bucket);
+            }
+        }
+        return latestBuckets;
+    }
+
+    private List<ForwardStatisticsFlow> buildRealtimeCurrentHourForwardBuckets(Long userId,
+                                                                               long hourTime,
+                                                                               List<UserPackageDto.UserForwardDetailDto> forwards) {
+        if (forwards.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        List<Long> forwardIds = forwards.stream()
+                .map(UserPackageDto.UserForwardDetailDto::getId)
+                .filter(Objects::nonNull)
+                .toList();
+        Map<Long, Forward> currentForwardMap = loadCurrentForwardMap(forwardIds);
+        Map<Long, ForwardStatisticsFlow> latestBuckets = loadLatestForwardBucketsBefore(hourTime, forwardIds);
+
+        List<ForwardStatisticsFlow> realtimeBuckets = new ArrayList<>();
+        for (UserPackageDto.UserForwardDetailDto forwardDetail : forwards) {
+            Long forwardId = forwardDetail.getId();
+            if (forwardId == null) {
+                continue;
+            }
+            Forward currentForward = currentForwardMap.get(forwardId);
+            ForwardStatisticsFlow latestBucket = latestBuckets.get(forwardId);
+
+            long currentInFlow = currentForward == null ? 0L : defaultLong(currentForward.getInFlow());
+            long currentOutFlow = currentForward == null ? 0L : defaultLong(currentForward.getOutFlow());
+            long realtimeInFlow = calculateIncrement(currentInFlow, latestBucket == null ? null : latestBucket.getTotalInFlow());
+            long realtimeOutFlow = calculateIncrement(currentOutFlow, latestBucket == null ? null : latestBucket.getTotalOutFlow());
+
+            ForwardStatisticsFlow bucket = new ForwardStatisticsFlow();
+            bucket.setUserId(currentForward != null && currentForward.getUserId() != null
+                    ? currentForward.getUserId().longValue()
+                    : (userId == null ? null : userId));
+            bucket.setForwardId(forwardId);
+            bucket.setForwardName(forwardDetail.getName());
+            bucket.setTunnelId(forwardDetail.getTunnelId() == null ? null : forwardDetail.getTunnelId().longValue());
+            bucket.setTunnelName(forwardDetail.getTunnelName());
+            bucket.setHourTime(hourTime);
+            bucket.setTime(formatHour(hourTime, RANGE_HOUR_FORMATTER));
+            bucket.setInFlow(realtimeInFlow);
+            bucket.setOutFlow(realtimeOutFlow);
+            bucket.setFlow(realtimeInFlow + realtimeOutFlow);
+            bucket.setTotalInFlow(currentInFlow);
+            bucket.setTotalOutFlow(currentOutFlow);
+            bucket.setTotalFlow(currentInFlow + currentOutFlow);
+            bucket.setCreatedTime(hourTime);
+            realtimeBuckets.add(bucket);
+        }
+        return realtimeBuckets;
+    }
+
+    private Map<Long, Forward> loadCurrentForwardMap(List<Long> forwardIds) {
+        if (forwardIds.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        List<Forward> currentForwards = forwardService.list(new QueryWrapper<Forward>().in("id", forwardIds));
+        Map<Long, Forward> forwardMap = new LinkedHashMap<>();
+        for (Forward currentForward : currentForwards) {
+            if (currentForward.getId() != null) {
+                forwardMap.put(currentForward.getId(), currentForward);
+            }
+        }
+        return forwardMap;
+    }
+
+    private Map<Long, ForwardStatisticsFlow> loadLatestForwardBucketsBefore(long hourTime, List<Long> forwardIds) {
+        if (forwardIds.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
+        List<ForwardStatisticsFlow> historicalBuckets = forwardStatisticsFlowService.list(
+                new QueryWrapper<ForwardStatisticsFlow>()
+                        .lt("hour_time", hourTime)
+                        .in("forward_id", forwardIds)
+                        .orderByDesc("hour_time")
+        );
+        Map<Long, ForwardStatisticsFlow> latestBuckets = new LinkedHashMap<>();
+        for (ForwardStatisticsFlow bucket : historicalBuckets) {
+            if (bucket.getForwardId() != null && !latestBuckets.containsKey(bucket.getForwardId())) {
+                latestBuckets.put(bucket.getForwardId(), bucket);
+            }
+        }
+        return latestBuckets;
     }
 
     private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> aggregateForwardStats(List<ForwardStatisticsFlow> flowList,
@@ -609,6 +786,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return Objects.equals(JwtUtil.getRoleIdFromToken(), 0);
     }
 
+    private boolean rangeContainsHour(NormalizedRange range, long hourTime) {
+        return range.startTime <= hourTime && range.endTime >= hourTime;
+    }
+
     private String validateRange(Long startTime, Long endTime) {
         if (endTime <= startTime) {
             return "结束时间必须大于开始时间";
@@ -635,6 +816,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return Instant.ofEpochMilli(timestamp)
                 .atZone(ZoneId.systemDefault())
                 .format(formatter);
+    }
+
+    private long calculateIncrement(long currentValue, Long previousTotal) {
+        if (previousTotal == null) {
+            return currentValue;
+        }
+        long increment = currentValue - previousTotal;
+        return increment < 0 ? currentValue : increment;
     }
 
     private long defaultLong(Long value) {

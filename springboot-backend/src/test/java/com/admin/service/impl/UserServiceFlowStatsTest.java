@@ -213,6 +213,161 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
     }
 
     @Test
+    void shouldIncludeRealtimeCurrentHourInUserFlowStatsAndHourDetail() {
+        long now = System.currentTimeMillis();
+        User user = saveUser("realtime-user", 1, now, 95L, 55L);
+        Tunnel tunnel = saveTunnel("realtime-tunnel", now, "4.4.4.4");
+
+        long currentHour = LocalDateTime.now()
+                .truncatedTo(ChronoUnit.HOURS)
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli();
+        long previousHour = currentHour - ChronoUnit.HOURS.getDuration().toMillis();
+
+        statisticsFlowService.save(buildUserBucket(user.getId(), previousHour, 10L, 5L, 15L, 75L, 35L));
+
+        Forward activeForward = saveForward(user, tunnel, now + 1, "realtime-forward-active", "8.8.4.4:80", 48_001);
+        activeForward.setInFlow(90L);
+        activeForward.setOutFlow(50L);
+        forwardService.updateById(activeForward);
+        forwardStatisticsFlowService.save(buildForwardBucket(
+                user.getId(),
+                activeForward.getId(),
+                activeForward.getName(),
+                tunnel.getId(),
+                tunnel.getName(),
+                previousHour,
+                6L,
+                4L,
+                10L,
+                70L,
+                30L
+        ));
+
+        Forward idleForward = saveForward(user, tunnel, now + 2, "realtime-forward-idle", "8.8.4.5:81", 48_002);
+        idleForward.setInFlow(5L);
+        idleForward.setOutFlow(5L);
+        forwardService.updateById(idleForward);
+        forwardStatisticsFlowService.save(buildForwardBucket(
+                user.getId(),
+                idleForward.getId(),
+                idleForward.getName(),
+                tunnel.getId(),
+                tunnel.getName(),
+                previousHour,
+                2L,
+                3L,
+                5L,
+                5L,
+                5L
+        ));
+
+        setUserRequest(user.getId().intValue(), 1, user.getUser());
+
+        FlowStatsQueryDto statsQuery = new FlowStatsQueryDto();
+        statsQuery.setStartTime(previousHour);
+        statsQuery.setEndTime(currentHour);
+
+        R statsResult = userService.getUserPackageFlowStats(statsQuery);
+
+        assertEquals(0, statsResult.getCode());
+        UserPackageFlowStatsDto statsDto = assertInstanceOf(UserPackageFlowStatsDto.class, statsResult.getData());
+        assertEquals(2, statsDto.getSeries().size());
+        assertEquals(15L, statsDto.getSeries().get(0).getFlow());
+        assertEquals(20L, statsDto.getSeries().get(1).getInFlow());
+        assertEquals(20L, statsDto.getSeries().get(1).getOutFlow());
+        assertEquals(40L, statsDto.getSeries().get(1).getFlow());
+        assertEquals(30L, statsDto.getSummary().getTotalInFlow());
+        assertEquals(25L, statsDto.getSummary().getTotalOutFlow());
+        assertEquals(55L, statsDto.getSummary().getTotalFlow());
+        assertEquals(currentHour, statsDto.getDefaultHourTime());
+        assertEquals(List.of("realtime-forward-active", "realtime-forward-idle"),
+                statsDto.getForwardStats().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getName).toList());
+        assertEquals(List.of(50L, 5L),
+                statsDto.getForwardStats().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).toList());
+
+        FlowStatsHourDetailQueryDto detailQuery = new FlowStatsHourDetailQueryDto();
+        detailQuery.setStartTime(previousHour);
+        detailQuery.setEndTime(currentHour);
+        detailQuery.setHourTime(currentHour);
+
+        R detailResult = userService.getUserPackageFlowHourDetail(detailQuery);
+
+        assertEquals(0, detailResult.getCode());
+        UserPackageFlowHourDetailDto detailDto = assertInstanceOf(UserPackageFlowHourDetailDto.class, detailResult.getData());
+        assertEquals(currentHour, detailDto.getHour().getHourTime());
+        assertEquals(20L, detailDto.getSummary().getTotalInFlow());
+        assertEquals(20L, detailDto.getSummary().getTotalOutFlow());
+        assertEquals(40L, detailDto.getSummary().getTotalFlow());
+        assertEquals(List.of("realtime-forward-active", "realtime-forward-idle"),
+                detailDto.getRows().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getName).toList());
+        assertEquals(List.of(40L, 0L),
+                detailDto.getRows().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).toList());
+    }
+
+    @Test
+    void shouldTreatRealtimeCountersAsResetWhenCurrentTotalsDropBelowSnapshot() {
+        long now = System.currentTimeMillis();
+        User user = saveUser("reset-user", 1, now, 7L, 3L);
+        Tunnel tunnel = saveTunnel("reset-tunnel", now, "5.5.5.5");
+
+        long currentHour = LocalDateTime.now()
+                .truncatedTo(ChronoUnit.HOURS)
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli();
+        long previousHour = currentHour - ChronoUnit.HOURS.getDuration().toMillis();
+
+        statisticsFlowService.save(buildUserBucket(user.getId(), previousHour, 7L, 8L, 15L, 100L, 90L));
+
+        Forward resetForward = saveForward(user, tunnel, now + 1, "reset-forward", "8.8.5.5:80", 58_001);
+        resetForward.setInFlow(7L);
+        resetForward.setOutFlow(3L);
+        forwardService.updateById(resetForward);
+        forwardStatisticsFlowService.save(buildForwardBucket(
+                user.getId(),
+                resetForward.getId(),
+                resetForward.getName(),
+                tunnel.getId(),
+                tunnel.getName(),
+                previousHour,
+                5L,
+                5L,
+                10L,
+                20L,
+                30L
+        ));
+
+        setUserRequest(user.getId().intValue(), 1, user.getUser());
+
+        FlowStatsQueryDto statsQuery = new FlowStatsQueryDto();
+        statsQuery.setStartTime(previousHour);
+        statsQuery.setEndTime(currentHour);
+
+        R statsResult = userService.getUserPackageFlowStats(statsQuery);
+
+        assertEquals(0, statsResult.getCode());
+        UserPackageFlowStatsDto statsDto = assertInstanceOf(UserPackageFlowStatsDto.class, statsResult.getData());
+        assertEquals(7L, statsDto.getSeries().get(1).getInFlow());
+        assertEquals(3L, statsDto.getSeries().get(1).getOutFlow());
+        assertEquals(10L, statsDto.getSeries().get(1).getFlow());
+        assertEquals(currentHour, statsDto.getDefaultHourTime());
+
+        FlowStatsHourDetailQueryDto detailQuery = new FlowStatsHourDetailQueryDto();
+        detailQuery.setStartTime(previousHour);
+        detailQuery.setEndTime(currentHour);
+        detailQuery.setHourTime(currentHour);
+
+        R detailResult = userService.getUserPackageFlowHourDetail(detailQuery);
+
+        assertEquals(0, detailResult.getCode());
+        UserPackageFlowHourDetailDto detailDto = assertInstanceOf(UserPackageFlowHourDetailDto.class, detailResult.getData());
+        assertEquals(List.of(10L),
+                detailDto.getRows().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).toList());
+    }
+
+    @Test
     void shouldReturnAdminGlobalDashboardAndFlowStats() {
         long now = System.currentTimeMillis();
         User admin = saveUser("global-admin", 0, now, 0L, 0L);
@@ -264,6 +419,70 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         assertEquals(2, statsDto.getMeta().getReturnedRuleCount());
         assertEquals(55L, statsDto.getSummary().getTotalFlow());
         assertEquals(List.of("global-user-1", "global-user-2"), statsDto.getForwardStats().stream().sorted(Comparator.comparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getName)).map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getUserName).toList());
+    }
+
+    @Test
+    void shouldAggregateRealtimeCurrentHourForAdminScope() {
+        long now = System.currentTimeMillis();
+        User admin = saveUser("realtime-admin", 0, now, 0L, 0L);
+        User userOne = saveUser("realtime-admin-user-1", 1, now, 90L, 50L);
+        User userTwo = saveUser("realtime-admin-user-2", 1, now, 40L, 25L);
+        Tunnel tunnel = saveTunnel("realtime-admin-tunnel", now, "6.6.6.6");
+
+        long currentHour = LocalDateTime.now()
+                .truncatedTo(ChronoUnit.HOURS)
+                .atZone(ZoneId.systemDefault())
+                .toInstant()
+                .toEpochMilli();
+        long previousHour = currentHour - ChronoUnit.HOURS.getDuration().toMillis();
+
+        statisticsFlowService.save(buildUserBucket(userOne.getId(), previousHour, 6L, 4L, 10L, 70L, 30L));
+
+        Forward forwardOne = saveForward(userOne, tunnel, now + 1, "realtime-admin-forward-a", "8.8.6.6:80", 68_001);
+        forwardOne.setInFlow(90L);
+        forwardOne.setOutFlow(50L);
+        forwardService.updateById(forwardOne);
+        forwardStatisticsFlowService.save(buildForwardBucket(
+                userOne.getId(),
+                forwardOne.getId(),
+                forwardOne.getName(),
+                tunnel.getId(),
+                tunnel.getName(),
+                previousHour,
+                6L,
+                4L,
+                10L,
+                70L,
+                30L
+        ));
+
+        Forward forwardTwo = saveForward(userTwo, tunnel, now + 2, "realtime-admin-forward-b", "8.8.6.7:81", 68_002);
+        forwardTwo.setInFlow(40L);
+        forwardTwo.setOutFlow(25L);
+        forwardService.updateById(forwardTwo);
+
+        setUserRequest(admin.getId().intValue(), 0, admin.getUser());
+
+        FlowStatsQueryDto statsQuery = new FlowStatsQueryDto();
+        statsQuery.setStartTime(previousHour);
+        statsQuery.setEndTime(currentHour);
+
+        R statsResult = userService.getUserPackageFlowStats(statsQuery);
+
+        assertEquals(0, statsResult.getCode());
+        UserPackageFlowStatsDto statsDto = assertInstanceOf(UserPackageFlowStatsDto.class, statsResult.getData());
+        assertEquals("global", statsDto.getMeta().getScope());
+        assertEquals("all", statsDto.getMeta().getRankingMode());
+        assertEquals(2, statsDto.getMeta().getTotalRuleCount());
+        assertEquals(2, statsDto.getMeta().getReturnedRuleCount());
+        assertEquals(10L, statsDto.getSeries().get(0).getFlow());
+        assertEquals(105L, statsDto.getSeries().get(1).getFlow());
+        assertEquals(115L, statsDto.getSummary().getTotalFlow());
+        assertEquals(currentHour, statsDto.getDefaultHourTime());
+        assertEquals(List.of("realtime-admin-user-2", "realtime-admin-user-1"),
+                statsDto.getForwardStats().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getUserName).toList());
+        assertEquals(List.of(65L, 40L),
+                statsDto.getForwardStats().stream().map(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).toList());
     }
 
     @Test
@@ -339,6 +558,16 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
     }
 
     private StatisticsFlow buildUserBucket(Long userId, long hourTime, long inFlow, long outFlow, long flow) {
+        return buildUserBucket(userId, hourTime, inFlow, outFlow, flow, inFlow, outFlow);
+    }
+
+    private StatisticsFlow buildUserBucket(Long userId,
+                                           long hourTime,
+                                           long inFlow,
+                                           long outFlow,
+                                           long flow,
+                                           long totalInFlow,
+                                           long totalOutFlow) {
         StatisticsFlow bucket = new StatisticsFlow();
         bucket.setUserId(userId);
         bucket.setHourTime(hourTime);
@@ -346,9 +575,9 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         bucket.setInFlow(inFlow);
         bucket.setOutFlow(outFlow);
         bucket.setFlow(flow);
-        bucket.setTotalInFlow(inFlow);
-        bucket.setTotalOutFlow(outFlow);
-        bucket.setTotalFlow(flow);
+        bucket.setTotalInFlow(totalInFlow);
+        bucket.setTotalOutFlow(totalOutFlow);
+        bucket.setTotalFlow(totalInFlow + totalOutFlow);
         bucket.setCreatedTime(hourTime);
         return bucket;
     }
@@ -362,6 +591,20 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
                                                      long inFlow,
                                                      long outFlow,
                                                      long flow) {
+        return buildForwardBucket(userId, forwardId, forwardName, tunnelId, tunnelName, hourTime, inFlow, outFlow, flow, inFlow, outFlow);
+    }
+
+    private ForwardStatisticsFlow buildForwardBucket(Long userId,
+                                                     Long forwardId,
+                                                     String forwardName,
+                                                     Long tunnelId,
+                                                     String tunnelName,
+                                                     long hourTime,
+                                                     long inFlow,
+                                                     long outFlow,
+                                                     long flow,
+                                                     long totalInFlow,
+                                                     long totalOutFlow) {
         ForwardStatisticsFlow bucket = new ForwardStatisticsFlow();
         bucket.setUserId(userId);
         bucket.setForwardId(forwardId);
@@ -373,9 +616,9 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         bucket.setInFlow(inFlow);
         bucket.setOutFlow(outFlow);
         bucket.setFlow(flow);
-        bucket.setTotalInFlow(inFlow);
-        bucket.setTotalOutFlow(outFlow);
-        bucket.setTotalFlow(flow);
+        bucket.setTotalInFlow(totalInFlow);
+        bucket.setTotalOutFlow(totalOutFlow);
+        bucket.setTotalFlow(totalInFlow + totalOutFlow);
         bucket.setCreatedTime(hourTime);
         return bucket;
     }

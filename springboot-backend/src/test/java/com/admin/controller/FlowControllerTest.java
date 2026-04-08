@@ -1,5 +1,7 @@
 package com.admin.controller;
 
+import com.admin.common.dto.GostConfigDto;
+import com.admin.common.task.CheckGostConfigAsync;
 import com.admin.entity.Forward;
 import com.admin.entity.Node;
 import com.admin.entity.Tunnel;
@@ -23,6 +25,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class FlowControllerTest {
+
+    @Test
+    void shouldPassNumericNodeIdToAsyncCleanupWhenReceivingConfig() {
+        FlowController controller = new FlowController();
+        controller.nodeService = Mockito.mock(NodeService.class);
+        controller.checkGostConfigAsync = Mockito.mock(CheckGostConfigAsync.class);
+
+        Node node = new Node();
+        node.setId(42L);
+        when(controller.nodeService.getOne(ArgumentMatchers.any())).thenReturn(node);
+
+        String result = controller.config("{\"services\":[],\"chains\":[],\"limiters\":[]}", "secret-a");
+
+        assertEquals("ok", result);
+        verify(controller.checkGostConfigAsync, times(1))
+                .cleanNodeConfigs(ArgumentMatchers.eq(42L), ArgumentMatchers.any(GostConfigDto.class));
+    }
 
     @Test
     void shouldSkipNonForwardServiceNamesAndStillProcessValidFlowItems() {

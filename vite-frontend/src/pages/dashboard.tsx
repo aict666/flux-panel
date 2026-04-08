@@ -12,6 +12,7 @@ import {
   buildHourDetailCacheKey,
   createDefaultFlowStatsRange,
   getForwardStatsHeading,
+  getHourDetailHeading,
   normalizeFlowSeries,
   resolveHourTimeFromChartInteraction,
   selectDefaultHourTime,
@@ -1121,9 +1122,9 @@ export default function DashboardPage() {
                   </div>
 
                   <div className="rounded-xl border border-divider">
-                    <div className="flex flex-col gap-2 px-4 py-3 border-b border-divider bg-default-50 md:flex-row md:items-center md:justify-between">
+                      <div className="flex flex-col gap-2 px-4 py-3 border-b border-divider bg-default-50 md:flex-row md:items-center md:justify-between">
                       <div>
-                        <div className="text-sm font-semibold text-foreground">当前小时规则消耗</div>
+                        <div className="text-sm font-semibold text-foreground">{getHourDetailHeading()}</div>
                         <div className="text-xs text-default-500">选中时间：{selectedHourLabel}</div>
                       </div>
                       <div className="text-xs text-default-500">
@@ -1156,7 +1157,7 @@ export default function DashboardPage() {
                           ) : !hourDetail || hourDetail.rows.length === 0 ? (
                             <tr>
                               <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-default-500">
-                                当前小时暂无规则流量明细
+                                该小时暂无规则流量明细
                               </td>
                             </tr>
                           ) : (
