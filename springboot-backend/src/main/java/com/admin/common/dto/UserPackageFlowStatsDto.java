@@ -39,12 +39,14 @@ public class UserPackageFlowStatsDto {
         private String rankingMode;
         private Integer totalRuleCount;
         private Integer returnedRuleCount;
+        private Boolean hasSamplingGap;
     }
 
     @Data
     public static class SeriesPointDto {
         private Long hourTime;
         private String time;
+        private Boolean sampled;
         private Long inFlow;
         private Long outFlow;
         private Long flow;

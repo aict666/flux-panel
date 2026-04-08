@@ -122,6 +122,7 @@ export default function DashboardPage() {
     rankingMode: "top10",
     totalRuleCount: 0,
     returnedRuleCount: 0,
+    hasSamplingGap: false,
   });
   const [isForwardStatsCollapsed, setIsForwardStatsCollapsed] = useState(false);
   const [forwardFlowStats, setForwardFlowStats] = useState<ForwardFlowStat[]>([]);
@@ -245,6 +246,7 @@ export default function DashboardPage() {
       rankingMode: "top10",
       totalRuleCount: 0,
       returnedRuleCount: 0,
+      hasSamplingGap: false,
     });
     setIsForwardStatsCollapsed(false);
     setForwardFlowStats([]);
@@ -273,6 +275,15 @@ export default function DashboardPage() {
     scope: FlowStatsScope;
     hourTime: number;
   }) => {
+    const selectedPoint = flowSeries.find((item) => item.hourTime === hourTime);
+    if (selectedPoint?.sampled === false) {
+      hourDetailRequestIdRef.current += 1;
+      setSelectedHourTime(hourTime);
+      setHourDetail(null);
+      setHourDetailLoading(false);
+      return;
+    }
+
     const cacheKey = buildHourDetailCacheKey(scope, startTime, endTime, hourTime);
     const cached = hourDetailCacheRef.current[cacheKey];
     if (cached) {
@@ -313,6 +324,7 @@ export default function DashboardPage() {
       rankingMode: "top10",
       totalRuleCount: 0,
       returnedRuleCount: 0,
+      hasSamplingGap: false,
     };
     const nextRange = stats.range;
 
@@ -331,6 +343,11 @@ export default function DashboardPage() {
     }
 
     const defaultHourTime = stats.defaultHourTime ?? selectDefaultHourTime(nextSeries, nextRange.endTime);
+    const defaultPoint = nextSeries.find((item) => item.hourTime === defaultHourTime);
+    if (defaultPoint?.sampled === false) {
+      setSelectedHourTime(defaultHourTime);
+      return;
+    }
     await loadHourDetail({
       startTime: nextRange.startTime,
       endTime: nextRange.endTime,
@@ -790,6 +807,14 @@ export default function DashboardPage() {
     if (!hourTime || !resolvedFlowStatsRange) {
       return;
     }
+    const selectedPoint = flowChartData.find((item) => item.hourTime === hourTime);
+    if (selectedPoint?.sampled === false) {
+      hourDetailRequestIdRef.current += 1;
+      setSelectedHourTime(hourTime);
+      setHourDetail(null);
+      setHourDetailLoading(false);
+      return;
+    }
     if (selectedHourTime === hourTime && (hourDetail || hourDetailLoading)) {
       return;
     }
@@ -805,6 +830,8 @@ export default function DashboardPage() {
     hourDetail?.hour?.time ||
     flowSeries.find((item) => item.hourTime === selectedHourTime)?.time ||
     "未选择";
+  const selectedFlowPoint = flowSeries.find((item) => item.hourTime === selectedHourTime) ?? null;
+  const selectedHourHasSamplingGap = selectedFlowPoint?.sampled === false;
   const showForwardOwner = shouldShowForwardOwner(flowStatsMeta.scope);
   const flowChartData = processFlowChartData();
 
@@ -955,7 +982,7 @@ export default function DashboardPage() {
                    <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z" />
                    <path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z" />
                  </svg>
-                 <h2 className="text-lg lg:text-xl font-semibold text-foreground">流量统计</h2>
+                 <h2 className="text-lg lg:text-xl font-semibold text-foreground">每小时增量流量</h2>
                </div>
                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,220px)_minmax(0,220px)_auto] lg:items-end">
                  <Input
@@ -1009,6 +1036,12 @@ export default function DashboardPage() {
                     </Card>
                   </div>
 
+                  {flowStatsMeta.hasSamplingGap && (
+                    <div className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-700">
+                      统计区间存在采样缺口，总量可能偏低。常见原因是服务重启、掉线或定时任务漏跑。
+                    </div>
+                  )}
+
                   <div className="h-64 lg:h-80 w-full">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart
@@ -1038,7 +1071,15 @@ export default function DashboardPage() {
                         <Tooltip
                           content={({ active, payload, label }) => {
                             if (active && payload && payload.length) {
-                              const point = payload[0]?.payload as { inFlow?: number; outFlow?: number };
+                              const point = payload[0]?.payload as { sampled?: boolean; inFlow?: number | null; outFlow?: number | null };
+                              if (point?.sampled === false) {
+                                return (
+                                  <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3">
+                                    <p className="font-medium text-foreground">{`时间: ${label}`}</p>
+                                    <p className="text-warning-600">该小时无采样数据</p>
+                                  </div>
+                                );
+                              }
                               return (
                                 <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3">
                                   <p className="font-medium text-foreground">{`时间: ${label}`}</p>
@@ -1056,6 +1097,7 @@ export default function DashboardPage() {
                           dataKey="flow"
                           stroke="#8b5cf6"
                           strokeWidth={3}
+                          connectNulls={false}
                           dot={false}
                           activeDot={{ r: 4, stroke: '#8b5cf6', strokeWidth: 2, fill: '#fff' }}
                         />
@@ -1128,7 +1170,9 @@ export default function DashboardPage() {
                         <div className="text-xs text-default-500">选中时间：{selectedHourLabel}</div>
                       </div>
                       <div className="text-xs text-default-500">
-                        {hourDetail
+                        {selectedHourHasSamplingGap
+                          ? "该小时无采样数据，常见于服务重启/任务漏跑"
+                          : hourDetail
                           ? `入站 ${formatFlow(hourDetail.summary.totalInFlow)} / 出站 ${formatFlow(hourDetail.summary.totalOutFlow)} / 总量 ${formatFlow(hourDetail.summary.totalFlow)}`
                           : "移动或点击图表上的小时点位查看明细"}
                       </div>
@@ -1152,6 +1196,12 @@ export default function DashboardPage() {
                             <tr>
                               <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-default-500">
                                 正在加载该小时流量明细...
+                              </td>
+                            </tr>
+                          ) : selectedHourHasSamplingGap ? (
+                            <tr>
+                              <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-warning-600">
+                                该小时无采样数据，常见于服务重启或定时任务漏跑
                               </td>
                             </tr>
                           ) : !hourDetail || hourDetail.rows.length === 0 ? (

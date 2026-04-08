@@ -31,15 +31,30 @@ describe("dashboard-flow-utils", () => {
   it("normalizes series order and keeps formatted values", () => {
     const chartData = normalizeFlowSeries(
       [
-        { hourTime: 2000, time: "04-07 12:00", flow: 20, inFlow: 12, outFlow: 8 },
-        { hourTime: 1000, time: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3 },
+        { hourTime: 2000, time: "04-07 12:00", flow: 20, inFlow: 12, outFlow: 8, sampled: true },
+        { hourTime: 1000, time: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, sampled: true },
       ],
       (value) => `${value} B`,
     );
 
     expect(chartData).toEqual([
-      { hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B" },
-      { hourTime: 2000, label: "04-07 12:00", flow: 20, inFlow: 12, outFlow: 8, formattedFlow: "20 B" },
+      { hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B", sampled: true },
+      { hourTime: 2000, label: "04-07 12:00", flow: 20, inFlow: 12, outFlow: 8, formattedFlow: "20 B", sampled: true },
+    ]);
+  });
+
+  it("keeps unsampled hours as chart gaps instead of coercing them to zero", () => {
+    const chartData = normalizeFlowSeries(
+      [
+        { hourTime: 2000, time: "04-07 12:00", flow: null, inFlow: null, outFlow: null, sampled: false },
+        { hourTime: 1000, time: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, sampled: true },
+      ],
+      (value) => `${value} B`,
+    );
+
+    expect(chartData).toEqual([
+      { hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B", sampled: true },
+      { hourTime: 2000, label: "04-07 12:00", flow: null, inFlow: null, outFlow: null, formattedFlow: null, sampled: false },
     ]);
   });
 
@@ -57,9 +72,9 @@ describe("dashboard-flow-utils", () => {
       selectDefaultHourTime(
         [
           { hourTime: 1000, time: "04-07 10:00", flow: 0, inFlow: 0, outFlow: 0 },
-          { hourTime: 2000, time: "04-07 11:00", flow: 12, inFlow: 10, outFlow: 2 },
-          { hourTime: 3000, time: "04-07 12:00", flow: 0, inFlow: 0, outFlow: 0 },
-          { hourTime: 4000, time: "04-07 13:00", flow: 8, inFlow: 5, outFlow: 3 },
+          { hourTime: 2000, time: "04-07 11:00", flow: 12, inFlow: 10, outFlow: 2, sampled: true },
+          { hourTime: 3000, time: "04-07 12:00", flow: 0, inFlow: 0, outFlow: 0, sampled: true },
+          { hourTime: 4000, time: "04-07 13:00", flow: 8, inFlow: 5, outFlow: 3, sampled: true },
         ],
         9999,
       ),
@@ -68,12 +83,25 @@ describe("dashboard-flow-utils", () => {
     expect(
       selectDefaultHourTime(
         [
-          { hourTime: 1000, time: "04-07 10:00", flow: 0, inFlow: 0, outFlow: 0 },
-          { hourTime: 2000, time: "04-07 11:00", flow: 0, inFlow: 0, outFlow: 0 },
+          { hourTime: 1000, time: "04-07 10:00", flow: 0, inFlow: 0, outFlow: 0, sampled: true },
+          { hourTime: 2000, time: "04-07 11:00", flow: 0, inFlow: 0, outFlow: 0, sampled: true },
         ],
         9999,
       ),
     ).toBe(9999);
+  });
+
+  it("ignores unsampled gaps when choosing the default hour", () => {
+    expect(
+      selectDefaultHourTime(
+        [
+          { hourTime: 1000, time: "04-07 10:00", flow: null, inFlow: null, outFlow: null, sampled: false },
+          { hourTime: 2000, time: "04-07 11:00", flow: 0, inFlow: 0, outFlow: 0, sampled: true },
+          { hourTime: 3000, time: "04-07 12:00", flow: 6, inFlow: 4, outFlow: 2, sampled: true },
+        ],
+        9999,
+      ),
+    ).toBe(3000);
   });
 
   it("builds a stable cache key for hourly detail requests", () => {
@@ -93,9 +121,9 @@ describe("dashboard-flow-utils", () => {
   it("resolves the hovered hour from recharts active index", () => {
     const chartData = normalizeFlowSeries(
       [
-        { hourTime: 1000, time: "04-07 10:00", flow: 10, inFlow: 7, outFlow: 3 },
-        { hourTime: 2000, time: "04-07 11:00", flow: 20, inFlow: 12, outFlow: 8 },
-        { hourTime: 3000, time: "04-07 12:00", flow: 30, inFlow: 18, outFlow: 12 },
+        { hourTime: 1000, time: "04-07 10:00", flow: 10, inFlow: 7, outFlow: 3, sampled: true },
+        { hourTime: 2000, time: "04-07 11:00", flow: 20, inFlow: 12, outFlow: 8, sampled: true },
+        { hourTime: 3000, time: "04-07 12:00", flow: 30, inFlow: 18, outFlow: 12, sampled: true },
       ],
       (value) => `${value} B`,
     );

@@ -226,7 +226,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 adminScope ? "global" : "self",
                 adminScope ? "all" : "top10",
                 allForwardStats.size(),
-                visibleForwardStats.size()
+                visibleForwardStats.size(),
+                series.stream().anyMatch(item -> Boolean.FALSE.equals(item.getSampled()))
         ));
         result.setDefaultHourTime(selectDefaultHourTime(series, range.endTime));
         result.setSeries(series);
@@ -269,7 +270,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 adminScope ? "global" : "self",
                 null,
                 rows.size(),
-                rows.size()
+                rows.size(),
+                hourTime != currentHour && !forwards.isEmpty() && rows.isEmpty()
         ));
         result.setRows(rows);
         return R.ok(result);
@@ -460,42 +462,16 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 range.startTime,
                 includeRealtimeCurrentHour ? currentHour - HOUR_MILLIS : range.endTime
         );
-        Map<Long, UserPackageFlowStatsDto.SeriesPointDto> flowMap = new LinkedHashMap<>();
-        for (StatisticsFlow statisticsFlow : flowList) {
-            if (statisticsFlow.getHourTime() == null) {
-                continue;
-            }
-            UserPackageFlowStatsDto.SeriesPointDto point = flowMap.computeIfAbsent(statisticsFlow.getHourTime(), key -> {
-                UserPackageFlowStatsDto.SeriesPointDto item = new UserPackageFlowStatsDto.SeriesPointDto();
-                item.setHourTime(key);
-                item.setTime(formatHour(key, RANGE_HOUR_FORMATTER));
-                item.setInFlow(0L);
-                item.setOutFlow(0L);
-                item.setFlow(0L);
-                return item;
-            });
-            point.setInFlow(point.getInFlow() + defaultLong(statisticsFlow.getInFlow()));
-            point.setOutFlow(point.getOutFlow() + defaultLong(statisticsFlow.getOutFlow()));
-            point.setFlow(point.getFlow() + defaultLong(statisticsFlow.getFlow()));
-        }
+        FlowStatsSeriesSupport.SeriesBuildResult historicalSeries = FlowStatsSeriesSupport.buildHistoricalSeries(
+                range.startTime,
+                includeRealtimeCurrentHour ? currentHour - HOUR_MILLIS : range.endTime,
+                flowList,
+                hourTime -> formatHour(hourTime, RANGE_HOUR_FORMATTER)
+        );
 
-        List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>();
-        for (long cursor = range.startTime; cursor <= range.endTime; cursor += HOUR_MILLIS) {
-            UserPackageFlowStatsDto.SeriesPointDto point;
-            if (includeRealtimeCurrentHour && cursor == currentHour) {
-                point = buildRealtimeSeriesPoint(userId, currentHour);
-            } else {
-                point = flowMap.get(cursor);
-            }
-            if (point == null) {
-                point = new UserPackageFlowStatsDto.SeriesPointDto();
-                point.setHourTime(cursor);
-                point.setTime(formatHour(cursor, RANGE_HOUR_FORMATTER));
-                point.setInFlow(0L);
-                point.setOutFlow(0L);
-                point.setFlow(0L);
-            }
-            result.add(point);
+        List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>(historicalSeries.getSeries());
+        if (includeRealtimeCurrentHour) {
+            result.add(buildRealtimeSeriesPoint(userId, currentHour));
         }
         return result;
     }
@@ -571,6 +547,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
         point.setHourTime(hourTime);
         point.setTime(formatHour(hourTime, RANGE_HOUR_FORMATTER));
+        point.setSampled(true);
         point.setInFlow(totalInFlow);
         point.setOutFlow(totalOutFlow);
         point.setFlow(totalInFlow + totalOutFlow);
@@ -738,13 +715,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     private UserPackageFlowStatsDto.SummaryDto buildSummaryFromSeries(List<UserPackageFlowStatsDto.SeriesPointDto> series) {
-        UserPackageFlowStatsDto.SummaryDto summary = new UserPackageFlowStatsDto.SummaryDto();
-        long totalInFlow = series.stream().mapToLong(item -> defaultLong(item.getInFlow())).sum();
-        long totalOutFlow = series.stream().mapToLong(item -> defaultLong(item.getOutFlow())).sum();
-        summary.setTotalInFlow(totalInFlow);
-        summary.setTotalOutFlow(totalOutFlow);
-        summary.setTotalFlow(totalInFlow + totalOutFlow);
-        return summary;
+        return FlowStatsSeriesSupport.buildSummary(series);
     }
 
     private UserPackageFlowStatsDto.SummaryDto buildSummaryFromRows(List<UserPackageFlowStatsDto.ForwardFlowStatsDto> rows) {
@@ -757,12 +728,17 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return summary;
     }
 
-    private UserPackageFlowStatsDto.MetaDto buildMeta(String scope, String rankingMode, int totalRuleCount, int returnedRuleCount) {
+    private UserPackageFlowStatsDto.MetaDto buildMeta(String scope,
+                                                      String rankingMode,
+                                                      int totalRuleCount,
+                                                      int returnedRuleCount,
+                                                      boolean hasSamplingGap) {
         UserPackageFlowStatsDto.MetaDto meta = new UserPackageFlowStatsDto.MetaDto();
         meta.setScope(scope);
         meta.setRankingMode(rankingMode);
         meta.setTotalRuleCount(totalRuleCount);
         meta.setReturnedRuleCount(returnedRuleCount);
+        meta.setHasSamplingGap(hasSamplingGap);
         return meta;
     }
 

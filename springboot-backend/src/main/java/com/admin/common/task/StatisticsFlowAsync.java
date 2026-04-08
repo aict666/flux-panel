@@ -43,8 +43,17 @@ public class StatisticsFlowAsync {
     @Resource
     ForwardStatisticsFlowService forwardStatisticsFlowService;
 
-    @Scheduled(cron = "0 0 * * * ?")
+    @PostConstruct
+    public void captureCurrentHourBucketsOnStartup() {
+        captureCurrentHourBuckets();
+    }
+
+    @Scheduled(cron = "0 */5 * * * ?")
     public void statistics_flow() {
+        captureCurrentHourBuckets();
+    }
+
+    void captureCurrentHourBuckets() {
         LocalDateTime currentHour = LocalDateTime.now().truncatedTo(ChronoUnit.HOURS);
         String hourString = currentHour.format(DateTimeFormatter.ofPattern("HH:mm"));
         long hourTime = currentHour.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();

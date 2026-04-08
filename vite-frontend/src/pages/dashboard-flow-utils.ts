@@ -6,9 +6,10 @@ export interface FlowStatsRangeState {
 export interface FlowSeriesPoint {
   hourTime: number;
   time: string;
-  inFlow: number;
-  outFlow: number;
-  flow: number;
+  sampled?: boolean;
+  inFlow: number | null;
+  outFlow: number | null;
+  flow: number | null;
 }
 
 export type FlowStatsScope = "self" | "global";
@@ -25,15 +26,17 @@ export interface FlowStatsMeta {
   rankingMode?: FlowStatsRankingMode | null;
   totalRuleCount: number;
   returnedRuleCount: number;
+  hasSamplingGap?: boolean;
 }
 
 export interface FlowChartPoint {
   hourTime: number;
   label: string;
-  inFlow: number;
-  outFlow: number;
-  flow: number;
-  formattedFlow: string;
+  sampled: boolean;
+  inFlow: number | null;
+  outFlow: number | null;
+  flow: number | null;
+  formattedFlow: string | null;
 }
 
 export interface ForwardFlowStat {
@@ -96,10 +99,11 @@ export function normalizeFlowSeries(
     .map((item) => ({
       hourTime: item.hourTime,
       label: item.time,
-      inFlow: item.inFlow ?? 0,
-      outFlow: item.outFlow ?? 0,
-      flow: item.flow ?? 0,
-      formattedFlow: formatFlow(item.flow ?? 0),
+      sampled: item.sampled !== false,
+      inFlow: item.sampled === false ? null : (item.inFlow ?? 0),
+      outFlow: item.sampled === false ? null : (item.outFlow ?? 0),
+      flow: item.sampled === false ? null : (item.flow ?? 0),
+      formattedFlow: item.sampled === false || item.flow === null ? null : formatFlow(item.flow),
     }));
 }
 
@@ -115,6 +119,9 @@ export function sortForwardStats(rows: ForwardFlowStat[]): ForwardFlowStat[] {
 export function selectDefaultHourTime(series: FlowSeriesPoint[], fallbackHourTime: number): number {
   const sorted = [...series].sort((left, right) => left.hourTime - right.hourTime);
   for (let index = sorted.length - 1; index >= 0; index -= 1) {
+    if (sorted[index].sampled === false) {
+      continue;
+    }
     if ((sorted[index].flow ?? 0) > 0) {
       return sorted[index].hourTime;
     }
