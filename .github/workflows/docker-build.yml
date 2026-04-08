@@ -2,7 +2,7 @@ name: Build and Push Images Based on Version
 
 # 在这里定义统一版本号
 env:
-  VERSION: "2026.04.2"
+  VERSION: "2026.04.3"
   IMAGE_PREFIX: "ghcr.io/aict666"
 
 on:
@@ -39,16 +39,20 @@ jobs:
           if git rev-parse "${{ env.VERSION }}" >/dev/null 2>&1; then
             echo "Tag ${{ env.VERSION }} already exists"
             echo "tag_exists=true" >> $GITHUB_OUTPUT
-            echo "should_build=false" >> $GITHUB_OUTPUT
             
-            # 检查从tag到现在，go-gost目录下的文件是否有变化
             TAG_COMMIT=$(git rev-list -n 1 "${{ env.VERSION }}")
+            HEAD_COMMIT=$(git rev-parse HEAD)
             echo "Tag commit: $TAG_COMMIT"
-            echo "Current HEAD: $(git rev-parse HEAD)"
+            echo "Current HEAD: $HEAD_COMMIT"
+
+            if [ "$TAG_COMMIT" = "$HEAD_COMMIT" ]; then
+              echo "HEAD matches tag, skip frontend/backend image rebuild"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+            else
+              echo "HEAD is newer than tag, rebuild frontend/backend images for existing version"
+              echo "should_build=true" >> $GITHUB_OUTPUT
+            fi
             
-            # 检查 go-gost 目录下是否有实际的文件内容变化
-            # 使用 --ignore-all-space 和 --ignore-blank-lines 来忽略空白差异
-            # 使用 --exit-code: 0表示无差异，1表示有差异
             if git diff --quiet --ignore-all-space --ignore-blank-lines $TAG_COMMIT HEAD -- go-gost/ 2>/dev/null; then
               echo "✅ GOST files unchanged since tag (no content changes)"
               echo "should_build_gost=false" >> $GITHUB_OUTPUT
@@ -208,7 +212,7 @@ jobs:
   create-release:
     name: Create Release and Tag
     needs: [check-version, build-gost, build-vite, build-java]
-    if: needs.check-version.outputs.should_build == 'true'
+    if: needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.tag_exists != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
