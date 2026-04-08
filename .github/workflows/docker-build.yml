@@ -80,6 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -258,7 +260,8 @@ jobs:
             git push origin "${VERSION}"
             RELEASE_SHA="${{ github.sha }}"
           else
-            RELEASE_SHA="$(git rev-list -n 1 "${VERSION}")"
+            git fetch --force --tags origin
+            RELEASE_SHA="$(git rev-list -n 1 "refs/tags/${VERSION}")"
           fi
           
           COMMIT_MSG=$(git log -1 --pretty=format:"%s" "$RELEASE_SHA")
