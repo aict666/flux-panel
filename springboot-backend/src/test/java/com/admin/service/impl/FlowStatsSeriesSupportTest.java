@@ -92,4 +92,78 @@ class FlowStatsSeriesSupportTest {
         assertEquals(2L, summary.getTotalOutFlow());
         assertEquals(10L, summary.getTotalFlow());
     }
+
+    @Test
+    void shouldAggregateHourlySeriesIntoDailyBucketsWhileKeepingPartialSampling() {
+        long dayOneHourOne = 1_000L;
+        long dayOneHourTwo = dayOneHourOne + HOUR_MILLIS;
+        long dayTwoHourOne = dayOneHourOne + 24 * HOUR_MILLIS;
+        long dayTwoHourTwo = dayTwoHourOne + HOUR_MILLIS;
+
+        UserPackageFlowStatsDto.SeriesPointDto sampledDayOnePoint = new UserPackageFlowStatsDto.SeriesPointDto();
+        sampledDayOnePoint.setHourTime(dayOneHourOne);
+        sampledDayOnePoint.setTime("hour-1");
+        sampledDayOnePoint.setSampled(true);
+        sampledDayOnePoint.setInFlow(8L);
+        sampledDayOnePoint.setOutFlow(2L);
+        sampledDayOnePoint.setFlow(10L);
+
+        UserPackageFlowStatsDto.SeriesPointDto gapDayOnePoint = new UserPackageFlowStatsDto.SeriesPointDto();
+        gapDayOnePoint.setHourTime(dayOneHourTwo);
+        gapDayOnePoint.setTime("hour-2");
+        gapDayOnePoint.setSampled(false);
+
+        UserPackageFlowStatsDto.SeriesPointDto gapDayTwoPoint = new UserPackageFlowStatsDto.SeriesPointDto();
+        gapDayTwoPoint.setHourTime(dayTwoHourOne);
+        gapDayTwoPoint.setTime("hour-3");
+        gapDayTwoPoint.setSampled(false);
+
+        UserPackageFlowStatsDto.SeriesPointDto sampledDayTwoPoint = new UserPackageFlowStatsDto.SeriesPointDto();
+        sampledDayTwoPoint.setHourTime(dayTwoHourTwo);
+        sampledDayTwoPoint.setTime("hour-4");
+        sampledDayTwoPoint.setSampled(true);
+        sampledDayTwoPoint.setInFlow(3L);
+        sampledDayTwoPoint.setOutFlow(1L);
+        sampledDayTwoPoint.setFlow(4L);
+
+        FlowStatsSeriesSupport.SeriesBuildResult result = FlowStatsSeriesSupport.aggregateSeriesByDay(
+                List.of(sampledDayOnePoint, gapDayOnePoint, gapDayTwoPoint, sampledDayTwoPoint),
+                bucketTime -> "day-" + bucketTime
+        );
+
+        assertTrue(result.hasSamplingGap());
+        assertEquals(2, result.getSeries().size());
+        assertTrue(result.getSeries().get(0).getSampled());
+        assertEquals(10L, result.getSeries().get(0).getFlow());
+        assertTrue(result.getSeries().get(1).getSampled());
+        assertEquals(4L, result.getSeries().get(1).getFlow());
+    }
+
+    @Test
+    void shouldKeepWholeDayAsGapWhenEveryHourInThatDayIsUnsampled() {
+        long dayOneHourOne = 1_000L;
+        long dayOneHourTwo = dayOneHourOne + HOUR_MILLIS;
+
+        UserPackageFlowStatsDto.SeriesPointDto gapOne = new UserPackageFlowStatsDto.SeriesPointDto();
+        gapOne.setHourTime(dayOneHourOne);
+        gapOne.setTime("hour-1");
+        gapOne.setSampled(false);
+
+        UserPackageFlowStatsDto.SeriesPointDto gapTwo = new UserPackageFlowStatsDto.SeriesPointDto();
+        gapTwo.setHourTime(dayOneHourTwo);
+        gapTwo.setTime("hour-2");
+        gapTwo.setSampled(false);
+
+        FlowStatsSeriesSupport.SeriesBuildResult result = FlowStatsSeriesSupport.aggregateSeriesByDay(
+                List.of(gapOne, gapTwo),
+                bucketTime -> "day-" + bucketTime
+        );
+
+        assertTrue(result.hasSamplingGap());
+        assertEquals(1, result.getSeries().size());
+        assertFalse(result.getSeries().get(0).getSampled());
+        assertNull(result.getSeries().get(0).getInFlow());
+        assertNull(result.getSeries().get(0).getOutFlow());
+        assertNull(result.getSeries().get(0).getFlow());
+    }
 }

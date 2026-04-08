@@ -127,9 +127,7 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
 
         setUserRequest(user.getId().intValue(), 1, user.getUser());
 
-        FlowStatsQueryDto queryDto = new FlowStatsQueryDto();
-        queryDto.setStartTime(startHour);
-        queryDto.setEndTime(endHour);
+        FlowStatsQueryDto queryDto = buildStatsQuery(startHour, endHour);
 
         R result = userService.getUserPackageFlowStats(queryDto);
 
@@ -145,14 +143,16 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         assertEquals(132L, data.getSummary().getTotalOutFlow());
         assertEquals(802L, data.getSummary().getTotalFlow());
         assertEquals("self", data.getMeta().getScope());
-        assertEquals("top10", data.getMeta().getRankingMode());
+        assertEquals("all", data.getMeta().getRankingMode());
         assertEquals(11, data.getMeta().getTotalRuleCount());
-        assertEquals(10, data.getMeta().getReturnedRuleCount());
+        assertEquals(11, data.getMeta().getReturnedRuleCount());
         assertEquals(endHour, data.getDefaultHourTime());
-        assertEquals(10, data.getForwardStats().size());
+        assertEquals(11, data.getForwardStats().size());
         assertEquals("query-forward-11", data.getForwardStats().get(0).getName());
         assertEquals("1.2.3.4:18011", data.getForwardStats().get(0).getInAddress());
-        assertEquals(24L, data.getForwardStats().get(9).getFlow());
+        assertEquals(12L, data.getForwardStats().get(10).getFlow());
+        assertEquals("转发流量榜", data.getRankings().getRightTitle());
+        assertEquals(11, data.getTopRuleSeries().size());
     }
 
     @Test
@@ -265,9 +265,7 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
 
         setUserRequest(user.getId().intValue(), 1, user.getUser());
 
-        FlowStatsQueryDto statsQuery = new FlowStatsQueryDto();
-        statsQuery.setStartTime(previousHour);
-        statsQuery.setEndTime(currentHour);
+        FlowStatsQueryDto statsQuery = buildStatsQuery(previousHour, currentHour);
 
         R statsResult = userService.getUserPackageFlowStats(statsQuery);
 
@@ -341,9 +339,7 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
 
         setUserRequest(user.getId().intValue(), 1, user.getUser());
 
-        FlowStatsQueryDto statsQuery = new FlowStatsQueryDto();
-        statsQuery.setStartTime(previousHour);
-        statsQuery.setEndTime(currentHour);
+        FlowStatsQueryDto statsQuery = buildStatsQuery(previousHour, currentHour);
 
         R statsResult = userService.getUserPackageFlowStats(statsQuery);
 
@@ -406,9 +402,10 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         assertEquals(2, packageDto.getForwards().size());
         assertEquals(Set.of("global-user-1", "global-user-2"), packageDto.getForwards().stream().map(UserPackageDto.UserForwardDetailDto::getUserName).collect(Collectors.toSet()));
 
-        FlowStatsQueryDto queryDto = new FlowStatsQueryDto();
-        queryDto.setStartTime(selectedHour - ChronoUnit.HOURS.getDuration().toMillis());
-        queryDto.setEndTime(selectedHour);
+        FlowStatsQueryDto queryDto = buildStatsQuery(
+                selectedHour - ChronoUnit.HOURS.getDuration().toMillis(),
+                selectedHour
+        );
         R flowStatsResult = userService.getUserPackageFlowStats(queryDto);
 
         assertEquals(0, flowStatsResult.getCode());
@@ -463,9 +460,7 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
 
         setUserRequest(admin.getId().intValue(), 0, admin.getUser());
 
-        FlowStatsQueryDto statsQuery = new FlowStatsQueryDto();
-        statsQuery.setStartTime(previousHour);
-        statsQuery.setEndTime(currentHour);
+        FlowStatsQueryDto statsQuery = buildStatsQuery(previousHour, currentHour);
 
         R statsResult = userService.getUserPackageFlowStats(statsQuery);
 
@@ -490,9 +485,10 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         User user = saveUser("range-user", 1, System.currentTimeMillis(), 0L, 0L);
         setUserRequest(user.getId().intValue(), 1, user.getUser());
 
-        FlowStatsQueryDto queryDto = new FlowStatsQueryDto();
-        queryDto.setStartTime(System.currentTimeMillis() - ChronoUnit.DAYS.getDuration().toMillis() * 31);
-        queryDto.setEndTime(System.currentTimeMillis());
+        FlowStatsQueryDto queryDto = buildStatsQuery(
+                System.currentTimeMillis() - ChronoUnit.DAYS.getDuration().toMillis() * 31,
+                System.currentTimeMillis()
+        );
 
         R result = userService.getUserPackageFlowStats(queryDto);
 
@@ -621,6 +617,15 @@ class UserServiceFlowStatsTest extends PostgresIntegrationTestSupport {
         bucket.setTotalFlow(totalInFlow + totalOutFlow);
         bucket.setCreatedTime(hourTime);
         return bucket;
+    }
+
+    private FlowStatsQueryDto buildStatsQuery(long startTime, long endTime) {
+        FlowStatsQueryDto queryDto = new FlowStatsQueryDto();
+        queryDto.setStartTime(startTime);
+        queryDto.setEndTime(endTime);
+        queryDto.setGranularity("hour");
+        queryDto.setMetric("flow");
+        return queryDto;
     }
 
     private void setUserRequest(int userId, int roleId, String name) {

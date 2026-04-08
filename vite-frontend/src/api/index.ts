@@ -22,7 +22,12 @@ export const getAllUsers = (pageData: any = {}) => Network.post("/user/list", pa
 export const updateUser = (data: any) => Network.post("/user/update", data);
 export const deleteUser = (id: number) => Network.post("/user/delete", { id });
 export const getUserPackageInfo = () => Network.post("/user/package");
-export const getUserPackageFlowStats = (data: { startTime: number; endTime: number }) => Network.post("/user/package/flow-stats", data);
+export const getUserPackageFlowStats = (data: {
+  startTime: number;
+  endTime: number;
+  granularity: "hour" | "day";
+  metric: "flow" | "inFlow" | "outFlow";
+}) => Network.post("/user/package/flow-stats", data);
 export const getUserPackageFlowHourDetail = (data: { startTime: number; endTime: number; hourTime: number }) =>
   Network.post("/user/package/flow-stats/hour-detail", data);
 

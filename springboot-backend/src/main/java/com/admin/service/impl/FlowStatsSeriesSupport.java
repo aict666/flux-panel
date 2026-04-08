@@ -8,6 +8,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
 import java.util.function.LongFunction;
 
 final class FlowStatsSeriesSupport {
@@ -75,8 +78,54 @@ final class FlowStatsSeriesSupport {
         return summary;
     }
 
+    static SeriesBuildResult aggregateSeriesByDay(List<UserPackageFlowStatsDto.SeriesPointDto> hourlySeries,
+                                                  LongFunction<String> timeFormatter) {
+        Map<Long, DailyAccumulator> dayMap = new LinkedHashMap<>();
+        boolean hasSamplingGap = false;
+
+        for (UserPackageFlowStatsDto.SeriesPointDto point : hourlySeries) {
+            if (point.getHourTime() == null) {
+                continue;
+            }
+
+            long dayStart = truncateToDay(point.getHourTime());
+            DailyAccumulator accumulator = dayMap.computeIfAbsent(
+                    dayStart,
+                    bucketTime -> new DailyAccumulator(bucketTime, timeFormatter.apply(bucketTime))
+            );
+
+            if (Boolean.FALSE.equals(point.getSampled())) {
+                hasSamplingGap = true;
+                accumulator.setHasUnsampledGap(true);
+                continue;
+            }
+
+            accumulator.setHasSampledValue(true);
+            accumulator.setInFlow(accumulator.getInFlow() + defaultLong(point.getInFlow()));
+            accumulator.setOutFlow(accumulator.getOutFlow() + defaultLong(point.getOutFlow()));
+            accumulator.setFlow(accumulator.getFlow() + defaultLong(point.getFlow()));
+        }
+
+        List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>();
+        for (DailyAccumulator accumulator : dayMap.values()) {
+            if (!accumulator.hasSampledValue()) {
+                result.add(createGapPoint(accumulator.getBucketTime(), accumulator.getTime()));
+                continue;
+            }
+
+            UserPackageFlowStatsDto.SeriesPointDto point = createSampledPoint(accumulator.getBucketTime(), accumulator.getTime());
+            point.setInFlow(accumulator.getInFlow());
+            point.setOutFlow(accumulator.getOutFlow());
+            point.setFlow(accumulator.getFlow());
+            result.add(point);
+        }
+
+        return new SeriesBuildResult(result, hasSamplingGap);
+    }
+
     static UserPackageFlowStatsDto.SeriesPointDto createSampledPoint(long hourTime, String time) {
         UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
+        point.setBucketTime(hourTime);
         point.setHourTime(hourTime);
         point.setTime(time);
         point.setSampled(true);
@@ -88,6 +137,7 @@ final class FlowStatsSeriesSupport {
 
     private static UserPackageFlowStatsDto.SeriesPointDto createGapPoint(long hourTime, String time) {
         UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
+        point.setBucketTime(hourTime);
         point.setHourTime(hourTime);
         point.setTime(time);
         point.setSampled(false);
@@ -99,6 +149,54 @@ final class FlowStatsSeriesSupport {
 
     private static long defaultLong(Long value) {
         return value == null ? 0L : value;
+    }
+
+    private static long truncateToDay(long timestamp) {
+        return Instant.ofEpochMilli(timestamp)
+                .atZone(ZoneId.systemDefault())
+                .truncatedTo(ChronoUnit.DAYS)
+                .toInstant()
+                .toEpochMilli();
+    }
+
+    @Getter
+    private static final class DailyAccumulator {
+        private final long bucketTime;
+        private final String time;
+        private boolean hasSampledValue;
+        private boolean hasUnsampledGap;
+        private long inFlow;
+        private long outFlow;
+        private long flow;
+
+        private DailyAccumulator(long bucketTime, String time) {
+            this.bucketTime = bucketTime;
+            this.time = time;
+        }
+
+        private void setHasSampledValue(boolean hasSampledValue) {
+            this.hasSampledValue = hasSampledValue;
+        }
+
+        private void setHasUnsampledGap(boolean hasUnsampledGap) {
+            this.hasUnsampledGap = hasUnsampledGap;
+        }
+
+        private boolean hasSampledValue() {
+            return hasSampledValue;
+        }
+
+        private void setInFlow(long inFlow) {
+            this.inFlow = inFlow;
+        }
+
+        private void setOutFlow(long outFlow) {
+            this.outFlow = outFlow;
+        }
+
+        private void setFlow(long flow) {
+            this.flow = flow;
+        }
     }
 
     @Getter

@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyPresetRange,
   buildHourDetailCacheKey,
+  buildTopRuleChartData,
   createDefaultFlowStatsRange,
+  createFlowStatsFilters,
   getHourDetailHeading,
   getForwardStatsHeading,
   normalizeFlowSeries,
   resolveHourTimeFromChartInteraction,
   selectDefaultHourTime,
   shouldCollapseForwardStatsByDefault,
+  shouldShowCustomRangeInputs,
   shouldShowForwardOwner,
   sortForwardStats,
   validateFlowStatsRange,
@@ -20,6 +24,42 @@ describe("dashboard-flow-utils", () => {
 
     expect(range.start).toBe("2026-04-06T13:00");
     expect(range.end).toBe("2026-04-07T12:00");
+  });
+
+  it("creates default dashboard filters with last-24-hours preset", () => {
+    const filters = createFlowStatsFilters(new Date("2026-04-07T12:34:56"));
+
+    expect(filters.preset).toBe("last24Hours");
+    expect(filters.granularity).toBe("hour");
+    expect(filters.metric).toBe("flow");
+    expect(filters.start).toBe("2026-04-06T13:00");
+    expect(filters.end).toBe("2026-04-07T12:00");
+  });
+
+  it("applies presets with matching default granularities", () => {
+    expect(applyPresetRange("last24Hours", new Date("2026-04-07T12:34:56"))).toMatchObject({
+      preset: "last24Hours",
+      granularity: "hour",
+      start: "2026-04-06T13:00",
+      end: "2026-04-07T12:00",
+    });
+
+    expect(applyPresetRange("last7Days", new Date("2026-04-07T12:34:56"))).toMatchObject({
+      preset: "last7Days",
+      granularity: "day",
+      start: "2026-03-31T13:00",
+      end: "2026-04-07T12:00",
+    });
+
+    expect(applyPresetRange("last30Days", new Date("2026-04-07T12:34:56"))).toMatchObject({
+      preset: "last30Days",
+      granularity: "day",
+      start: "2026-03-08T13:00",
+      end: "2026-04-07T12:00",
+    });
+
+    expect(shouldShowCustomRangeInputs("custom")).toBe(true);
+    expect(shouldShowCustomRangeInputs("last24Hours")).toBe(false);
   });
 
   it("validates range order and thirty-day limit", () => {
@@ -38,8 +78,8 @@ describe("dashboard-flow-utils", () => {
     );
 
     expect(chartData).toEqual([
-      { hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B", sampled: true },
-      { hourTime: 2000, label: "04-07 12:00", flow: 20, inFlow: 12, outFlow: 8, formattedFlow: "20 B", sampled: true },
+      { bucketTime: 1000, hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B", sampled: true },
+      { bucketTime: 2000, hourTime: 2000, label: "04-07 12:00", flow: 20, inFlow: 12, outFlow: 8, formattedFlow: "20 B", sampled: true },
     ]);
   });
 
@@ -53,8 +93,8 @@ describe("dashboard-flow-utils", () => {
     );
 
     expect(chartData).toEqual([
-      { hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B", sampled: true },
-      { hourTime: 2000, label: "04-07 12:00", flow: null, inFlow: null, outFlow: null, formattedFlow: null, sampled: false },
+      { bucketTime: 1000, hourTime: 1000, label: "04-07 11:00", flow: 10, inFlow: 7, outFlow: 3, formattedFlow: "10 B", sampled: true },
+      { bucketTime: 2000, hourTime: 2000, label: "04-07 12:00", flow: null, inFlow: null, outFlow: null, formattedFlow: null, sampled: false },
     ]);
   });
 
@@ -132,5 +172,41 @@ describe("dashboard-flow-utils", () => {
     expect(resolveHourTimeFromChartInteraction(chartData, "2")).toBe(3000);
     expect(resolveHourTimeFromChartInteraction(chartData, undefined)).toBeNull();
     expect(resolveHourTimeFromChartInteraction(chartData, "bad-index")).toBeNull();
+  });
+
+  it("builds chart rows for multi-series top-rule trends", () => {
+    const { chartData, seriesMeta } = buildTopRuleChartData(
+      [
+        {
+          id: 1,
+          name: "rule-a",
+          totalFlow: 18,
+          totalInFlow: 12,
+          totalOutFlow: 6,
+          series: [
+            { bucketTime: 1000, time: "04-07 10:00", flow: 10, inFlow: 7, outFlow: 3, sampled: true },
+            { bucketTime: 2000, time: "04-07 11:00", flow: 8, inFlow: 5, outFlow: 3, sampled: true },
+          ],
+        },
+        {
+          id: 2,
+          name: "rule-b",
+          totalFlow: 9,
+          totalInFlow: 4,
+          totalOutFlow: 5,
+          series: [
+            { bucketTime: 1000, time: "04-07 10:00", flow: 3, inFlow: 1, outFlow: 2, sampled: true },
+            { bucketTime: 2000, time: "04-07 11:00", flow: null, inFlow: null, outFlow: null, sampled: false },
+          ],
+        },
+      ],
+      "flow",
+    );
+
+    expect(seriesMeta.map((item) => item.key)).toEqual(["rule_1", "rule_2"]);
+    expect(chartData).toEqual([
+      { bucketTime: 1000, label: "04-07 10:00", sampled: true, rule_1: 10, rule_2: 3 },
+      { bucketTime: 2000, label: "04-07 11:00", sampled: false, rule_1: null, rule_2: null },
+    ]);
   });
 });

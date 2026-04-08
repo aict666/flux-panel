@@ -1,1438 +1,663 @@
+import { useEffect, useState } from "react";
+import toast from "react-hot-toast";
 import { Card, CardBody, CardHeader } from "@heroui/card";
 import { Button } from "@heroui/button";
 import { Input } from "@heroui/input";
-import { Modal, ModalContent, ModalHeader, ModalBody } from "@heroui/modal";
-import { useState, useEffect, useRef } from "react";
-import toast from 'react-hot-toast';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
-
-
-import { getUserPackageFlowHourDetail, getUserPackageFlowStats, getUserPackageInfo } from "@/api";
+import { Select, SelectItem } from "@heroui/select";
 import {
-  buildHourDetailCacheKey,
-  createDefaultFlowStatsRange,
-  getForwardStatsHeading,
-  getHourDetailHeading,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+import { getUserPackageFlowStats } from "@/api";
+import {
+  applyPresetRange,
+  buildTopRuleChartData,
+  createFlowStatsFilters,
   normalizeFlowSeries,
-  resolveHourTimeFromChartInteraction,
-  selectDefaultHourTime,
-  shouldCollapseForwardStatsByDefault,
-  sortForwardStats,
-  shouldShowForwardOwner,
+  shouldShowCustomRangeInputs,
+  toDatetimeLocalValue,
   validateFlowStatsRange,
-  type FlowStatsMeta,
+  type FlowChartPoint,
   type FlowSeriesPoint,
-  type FlowStatsRangeState,
-  type FlowStatsScope,
+  type FlowStatsFiltersState,
+  type FlowStatsGranularity,
+  type FlowStatsMeta,
+  type FlowStatsMetric,
+  type FlowStatsPreset,
   type FlowStatsSummary,
-  type ForwardFlowStat,
+  type TopRuleSeries,
 } from "./dashboard-flow-utils";
 
-interface UserInfo {
-  flow: number;
-  inFlow: number;
-  outFlow: number;
-  num: number;
-  expTime?: string;
-  flowResetTime?: number;
+interface FlowStatsResponse {
+  filters: {
+    startTime: number;
+    endTime: number;
+    granularity: FlowStatsGranularity;
+    metric: FlowStatsMetric;
+  };
+  overviewCards: {
+    userCount?: number;
+    tunnelCount?: number;
+    forwardCount?: number;
+    totalInFlow?: number;
+    totalOutFlow?: number;
+    totalFlow?: number;
+    flowLimit?: number;
+    usedFlow?: number;
+    forwardLimit?: number;
+    usedForwardCount?: number;
+    peakBucketTime?: number | null;
+    peakBucketValue?: number | null;
+  };
+  rankings: {
+    leftTitle: string;
+    rightTitle: string;
+    left: RankingItem[];
+    right: RankingItem[];
+  };
+  summary: FlowStatsSummary;
+  trendSeries: FlowSeriesPoint[];
+  topRuleSeries: TopRuleSeries[];
+  meta: FlowStatsMeta;
 }
 
-interface UserTunnel {
-  id: number;
-  tunnelId: number;
-  tunnelName: string;
-  flow: number;
-  inFlow: number;
-  outFlow: number;
-  num: number;
-  expTime?: string;
-  flowResetTime?: number;
-  tunnelFlow: number;
-}
-
-interface Forward {
+interface RankingItem {
   id: number;
   name: string;
-  userName?: string;
-  tunnelId: number;
-  tunnelName: string;
-  inIp: string;
-  inPort: number;
-  remoteAddr: string;
+  secondaryName?: string;
   inFlow: number;
   outFlow: number;
+  flow: number;
 }
 
-interface AddressItem {
-  id: number;
-  ip: string;
-  address: string;
-  copying: boolean;
-}
+const PRESET_OPTIONS: Array<{ key: FlowStatsPreset; label: string }> = [
+  { key: "last24Hours", label: "近24小时" },
+  { key: "last7Days", label: "近7天" },
+  { key: "last30Days", label: "近30天" },
+  { key: "custom", label: "自定义" },
+];
 
-interface AdminOverview {
-  userCount: number;
-  tunnelCount: number;
-  forwardCount: number;
-  totalInFlow: number;
-  totalOutFlow: number;
-  totalFlow: number;
-}
+const GRANULARITY_OPTIONS: Array<{ key: FlowStatsGranularity; label: string }> = [
+  { key: "hour", label: "按小时" },
+  { key: "day", label: "按天" },
+];
 
-interface PackageInfoResponse {
-  dashboardMode?: "user" | "admin";
-  userInfo?: UserInfo;
-  tunnelPermissions?: UserTunnel[];
-  forwards?: Forward[];
-  adminOverview?: AdminOverview;
-}
+const METRIC_OPTIONS: Array<{ key: FlowStatsMetric; label: string }> = [
+  { key: "flow", label: "总流量" },
+  { key: "inFlow", label: "入站" },
+  { key: "outFlow", label: "出站" },
+];
 
-interface FlowStatsResponse {
-  range: {
-    startTime: number;
-    endTime: number;
-  };
-  summary: FlowStatsSummary;
-  meta: FlowStatsMeta;
-  defaultHourTime: number;
-  series: FlowSeriesPoint[];
-  forwardStats: ForwardFlowStat[];
-}
+const METRIC_COLORS: Record<FlowStatsMetric, string> = {
+  flow: "#3b82f6",
+  inFlow: "#10b981",
+  outFlow: "#f97316",
+};
 
-interface HourDetailResponse {
-  hour: {
-    hourTime: number;
-    time: string;
-  };
-  summary: FlowStatsSummary;
-  meta: FlowStatsMeta;
-  rows: ForwardFlowStat[];
-}
+const MAX_RANKING_ROWS = 8;
 
 export default function DashboardPage() {
+  const [filters, setFilters] = useState<FlowStatsFiltersState>(() => createFlowStatsFilters());
+  const [data, setData] = useState<FlowStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [userInfo, setUserInfo] = useState<UserInfo>({} as UserInfo);
-  const [userTunnels, setUserTunnels] = useState<UserTunnel[]>([]);
-  const [forwardList, setForwardList] = useState<Forward[]>([]);
-  const [adminOverview, setAdminOverview] = useState<AdminOverview | null>(null);
-  const [flowSeries, setFlowSeries] = useState<FlowSeriesPoint[]>([]);
-  const [flowStatsSummary, setFlowStatsSummary] = useState<FlowStatsSummary>({ totalInFlow: 0, totalOutFlow: 0, totalFlow: 0 });
-  const [flowStatsMeta, setFlowStatsMeta] = useState<FlowStatsMeta>({
-    scope: "self",
-    rankingMode: "top10",
-    totalRuleCount: 0,
-    returnedRuleCount: 0,
-    hasSamplingGap: false,
-  });
-  const [isForwardStatsCollapsed, setIsForwardStatsCollapsed] = useState(false);
-  const [forwardFlowStats, setForwardFlowStats] = useState<ForwardFlowStat[]>([]);
-  const [flowStatsLoading, setFlowStatsLoading] = useState(false);
-  const [flowStatsRange, setFlowStatsRange] = useState<FlowStatsRangeState>(() => createDefaultFlowStatsRange());
-  const [resolvedFlowStatsRange, setResolvedFlowStatsRange] = useState<{ startTime: number; endTime: number } | null>(null);
-  const [selectedHourTime, setSelectedHourTime] = useState<number | null>(null);
-  const [hourDetail, setHourDetail] = useState<HourDetailResponse | null>(null);
-  const [hourDetailLoading, setHourDetailLoading] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const hourDetailCacheRef = useRef<Record<string, HourDetailResponse>>({});
-  const hourDetailRequestIdRef = useRef(0);
-  
-  const [addressModalOpen, setAddressModalOpen] = useState(false);
-  const [addressModalTitle, setAddressModalTitle] = useState('');
-  const [addressList, setAddressList] = useState<AddressItem[]>([]);
-
-  // 检查有效期通知
-  const checkExpirationNotifications = (userInfo: UserInfo, tunnels: UserTunnel[]) => {
-    // 避免重复通知，检查是否已经显示过
-    const notificationKey = `expiration-${userInfo.expTime}-${tunnels.map(t => t.expTime).join(',')}`;
-    const lastNotified = localStorage.getItem('lastNotified');
-    
-    if (lastNotified === notificationKey) {
-      return; // 已经通知过，不重复显示
-    }
-    
-    let hasNotification = false;
-    
-    // 检查主账户有效期
-    if (userInfo.expTime) {
-      const expDate = new Date(userInfo.expTime);
-      const now = new Date();
-      
-      if (!isNaN(expDate.getTime()) && expDate > now) {
-        const diffTime = expDate.getTime() - now.getTime();
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-        
-        if (diffDays <= 7 && diffDays > 0) {
-          hasNotification = true;
-          if (diffDays === 1) {
-            toast('账户将于明天过期，请及时续费', { 
-              icon: '⚠️',
-              duration: 6000,
-              style: { background: '#f59e0b', color: '#fff' }
-            });
-          } else {
-            toast(`账户将于${diffDays}天后过期，请及时续费`, { 
-              icon: '⚠️',
-              duration: 6000,
-              style: { background: '#f59e0b', color: '#fff' }
-            });
-          }
-        } else if (diffDays <= 0) {
-          hasNotification = true;
-          toast('账户已过期，请立即续费', { 
-            icon: '⚠️',
-            duration: 8000,
-            style: { background: '#ef4444', color: '#fff' }
-          });
-        }
-      }
-    }
-    
-    // 检查隧道有效期
-    tunnels.forEach(tunnel => {
-      if (tunnel.expTime) {
-        const expDate = new Date(tunnel.expTime);
-        const now = new Date();
-        
-        if (!isNaN(expDate.getTime()) && expDate > now) {
-          const diffTime = expDate.getTime() - now.getTime();
-          const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-          
-          if (diffDays <= 7 && diffDays > 0) {
-            hasNotification = true;
-            if (diffDays === 1) {
-              toast(`隧道"${tunnel.tunnelName}"将于明天过期`, { 
-                icon: '⚠️',
-                duration: 5000,
-                style: { background: '#f59e0b', color: '#fff' }
-              });
-            } else {
-              toast(`隧道"${tunnel.tunnelName}"将于${diffDays}天后过期`, { 
-                icon: '⚠️',
-                duration: 5000,
-                style: { background: '#f59e0b', color: '#fff' }
-              });
-            }
-          } else if (diffDays <= 0) {
-            hasNotification = true;
-            toast(`隧道"${tunnel.tunnelName}"已过期`, { 
-              icon: '⚠️',
-              duration: 6000,
-              style: { background: '#ef4444', color: '#fff' }
-            });
-          }
-        }
-      }
-    });
-    
-    // 如果显示了通知，记录防止重复
-    if (hasNotification) {
-      localStorage.setItem('lastNotified', notificationKey);
-    }
-  };
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    const defaultRange = createDefaultFlowStatsRange();
-
-    // 重置状态并加载数据，防止页面切换时显示旧数据
-    setLoading(true);
-    setUserInfo({} as UserInfo);
-    setUserTunnels([]);
-    setForwardList([]);
-    setAdminOverview(null);
-    setFlowSeries([]);
-    setFlowStatsSummary({ totalInFlow: 0, totalOutFlow: 0, totalFlow: 0 });
-    setFlowStatsMeta({
-      scope: "self",
-      rankingMode: "top10",
-      totalRuleCount: 0,
-      returnedRuleCount: 0,
-      hasSamplingGap: false,
-    });
-    setIsForwardStatsCollapsed(false);
-    setForwardFlowStats([]);
-    setFlowStatsRange(defaultRange);
-    setResolvedFlowStatsRange(null);
-    setSelectedHourTime(null);
-    setHourDetail(null);
-    hourDetailCacheRef.current = {};
-    
-    // 检查用户是否是管理员
-    const adminStatus = localStorage.getItem('admin');
-    setIsAdmin(adminStatus === 'true');
-    
-    loadPackageData(defaultRange);
-    localStorage.setItem('e', '/dashboard');
+    const initialFilters = createFlowStatsFilters();
+    setFilters(initialFilters);
+    localStorage.setItem("e", "/dashboard");
+    void loadDashboard(initialFilters, true);
   }, []);
 
-  const loadHourDetail = async ({
-    startTime,
-    endTime,
-    scope,
-    hourTime,
-  }: {
-    startTime: number;
-    endTime: number;
-    scope: FlowStatsScope;
-    hourTime: number;
-  }) => {
-    const selectedPoint = flowSeries.find((item) => item.hourTime === hourTime);
-    if (selectedPoint?.sampled === false) {
-      hourDetailRequestIdRef.current += 1;
-      setSelectedHourTime(hourTime);
-      setHourDetail(null);
-      setHourDetailLoading(false);
-      return;
-    }
-
-    const cacheKey = buildHourDetailCacheKey(scope, startTime, endTime, hourTime);
-    const cached = hourDetailCacheRef.current[cacheKey];
-    if (cached) {
-      setSelectedHourTime(hourTime);
-      setHourDetail(cached);
-      return;
-    }
-
-    const requestId = ++hourDetailRequestIdRef.current;
-    setSelectedHourTime(hourTime);
-    setHourDetailLoading(true);
-    try {
-      const res = await getUserPackageFlowHourDetail({ startTime, endTime, hourTime });
-      if (res.code !== 0) {
-        toast.error(res.msg || "获取小时流量明细失败");
-        return;
-      }
-
-      const data = res.data as HourDetailResponse;
-      hourDetailCacheRef.current[cacheKey] = data;
-      if (requestId === hourDetailRequestIdRef.current) {
-        setHourDetail(data);
-      }
-    } catch (error) {
-      console.error("获取小时流量明细失败:", error);
-      toast.error("获取小时流量明细失败");
-    } finally {
-      if (requestId === hourDetailRequestIdRef.current) {
-        setHourDetailLoading(false);
-      }
-    }
-  };
-
-  const applyFlowStatsResponse = async (stats: FlowStatsResponse) => {
-    const nextSeries = stats.series || [];
-    const nextMeta = stats.meta || {
-      scope: "self",
-      rankingMode: "top10",
-      totalRuleCount: 0,
-      returnedRuleCount: 0,
-      hasSamplingGap: false,
-    };
-    const nextRange = stats.range;
-
-    setFlowSeries(nextSeries);
-    setFlowStatsSummary(stats.summary || { totalInFlow: 0, totalOutFlow: 0, totalFlow: 0 });
-    setFlowStatsMeta(nextMeta);
-    setIsForwardStatsCollapsed(shouldCollapseForwardStatsByDefault(nextMeta.rankingMode));
-    setForwardFlowStats(sortForwardStats(stats.forwardStats || []));
-    setResolvedFlowStatsRange(nextRange || null);
-    setHourDetail(null);
-    hourDetailCacheRef.current = {};
-
-    if (!nextRange || nextSeries.length === 0) {
-      setSelectedHourTime(null);
-      return;
-    }
-
-    const defaultHourTime = stats.defaultHourTime ?? selectDefaultHourTime(nextSeries, nextRange.endTime);
-    const defaultPoint = nextSeries.find((item) => item.hourTime === defaultHourTime);
-    if (defaultPoint?.sampled === false) {
-      setSelectedHourTime(defaultHourTime);
-      return;
-    }
-    await loadHourDetail({
-      startTime: nextRange.startTime,
-      endTime: nextRange.endTime,
-      scope: nextMeta.scope,
-      hourTime: defaultHourTime,
-    });
-  };
-
-  const loadPackageData = async (range: FlowStatsRangeState) => {
-    setLoading(true);
-    try {
-      const [packageRes, flowStatsRes] = await Promise.all([
-        getUserPackageInfo(),
-        getUserPackageFlowStats({
-          startTime: new Date(range.start).getTime(),
-          endTime: new Date(range.end).getTime(),
-        }),
-      ]);
-
-      if (packageRes.code === 0) {
-        const data = packageRes.data as PackageInfoResponse;
-        const adminMode = data.dashboardMode === "admin" || localStorage.getItem("admin") === "true";
-        setIsAdmin(adminMode);
-        setUserInfo((data.userInfo || {}) as UserInfo);
-        setUserTunnels(data.tunnelPermissions || []);
-        setForwardList(data.forwards || []);
-        setAdminOverview(data.adminOverview || null);
-        
-        // 检查有效期并显示通知
-        if (!adminMode && data.userInfo) {
-          checkExpirationNotifications(data.userInfo, data.tunnelPermissions || []);
-        }
-      } else {
-        toast.error(packageRes.msg || '获取套餐信息失败');
-      }
-
-      if (flowStatsRes.code === 0) {
-        const stats = flowStatsRes.data as FlowStatsResponse;
-        await applyFlowStatsResponse(stats);
-      } else {
-        toast.error(flowStatsRes.msg || '获取流量统计失败');
-      }
-    } catch (error) {
-      console.error('获取仪表盘数据失败:', error);
-      toast.error('获取仪表盘数据失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const formatFlow = (value: number, unit: string = 'bytes'): string => {
-    // 99999 表示无限制
-    if (value === 99999) {
-      return '无限制';
-    }
-    
-    if (unit === 'gb') {
-      return value + ' GB';
-    } else {
-      if (value === 0) return '0 B';
-      if (value < 1024) return value + ' B';
-      if (value < 1024 * 1024) return (value / 1024).toFixed(2) + ' KB';
-      if (value < 1024 * 1024 * 1024) return (value / (1024 * 1024)).toFixed(2) + ' MB';
-      return (value / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-    }
-  };
-
-  const formatNumber = (value: number): string => {
-    // 99999 表示无限制
-    if (value === 99999) {
-      return '无限制';
-    }
-    return value.toString();
-  };
-
-  const processFlowChartData = () => normalizeFlowSeries(flowSeries, (value) => formatFlow(value));
-
-  const handleFlowStatsQuery = async () => {
-    const validationError = validateFlowStatsRange(flowStatsRange.start, flowStatsRange.end);
+  const loadDashboard = async (nextFilters: FlowStatsFiltersState, initialLoad = false) => {
+    const validationError = validateFlowStatsRange(nextFilters.start, nextFilters.end);
     if (validationError) {
       toast.error(validationError);
       return;
     }
 
-    setFlowStatsLoading(true);
-    try {
-      const res = await getUserPackageFlowStats({
-        startTime: new Date(flowStatsRange.start).getTime(),
-        endTime: new Date(flowStatsRange.end).getTime(),
-      });
-      if (res.code === 0) {
-        const data = res.data as FlowStatsResponse;
-        await applyFlowStatsResponse(data);
-      } else {
-        toast.error(res.msg || '获取流量统计失败');
-      }
-    } catch (error) {
-      console.error('获取流量统计失败:', error);
-      toast.error('获取流量统计失败');
-    } finally {
-      setFlowStatsLoading(false);
-    }
-  };
-
-
-  const getExpStatus = (expTime?: string) => {
-    if (!expTime) return { 
-      color: 'text-green-600 dark:text-green-400', 
-      bg: 'bg-green-50 dark:bg-green-500/10 border-green-200 dark:border-green-500/20',
-      text: '永久' 
-    };
-
-    const now = new Date();
-    const expDate = new Date(expTime);
-
-    if (isNaN(expDate.getTime())) {
-      return { 
-        color: 'text-gray-600 dark:text-gray-400', 
-        bg: 'bg-gray-50 dark:bg-black/10 border-gray-200 dark:border-gray-500/20',
-        text: '无效' 
-      };
-    }
-
-    if (expDate < now) {
-      return { 
-        color: 'text-red-600 dark:text-red-400', 
-        bg: 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20',
-        text: '已过期' 
-      };
-    }
-
-    const diffTime = expDate.getTime() - now.getTime();
-    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    if (diffDays <= 7) {
-      return { 
-        color: 'text-red-600 dark:text-red-400', 
-        bg: 'bg-red-50 dark:bg-red-500/10 border-red-200 dark:border-red-500/20',
-        text: `${diffDays}天后过期` 
-      };
-    } else if (diffDays <= 30) {
-      return { 
-        color: 'text-orange-600 dark:text-orange-400', 
-        bg: 'bg-orange-50 dark:bg-orange-500/10 border-orange-200 dark:border-orange-500/20',
-        text: `${diffDays}天后过期` 
-      };
+    if (initialLoad) {
+      setLoading(true);
     } else {
-      return { 
-        color: 'text-green-600 dark:text-green-400', 
-        bg: 'bg-green-50 dark:bg-green-500/10 border-green-200 dark:border-green-500/20',
-        text: `${diffDays}天后过期` 
-      };
+      setRefreshing(true);
+    }
+
+    try {
+      const response = await getUserPackageFlowStats({
+        startTime: new Date(nextFilters.start).getTime(),
+        endTime: new Date(nextFilters.end).getTime(),
+        granularity: nextFilters.granularity,
+        metric: nextFilters.metric,
+      });
+
+      if (response.code !== 0) {
+        toast.error(response.msg || "获取仪表盘数据失败");
+        return;
+      }
+
+      const nextData = response.data as FlowStatsResponse;
+      setData(nextData);
+      setFilters((current) => ({
+        ...current,
+        start: toDatetimeLocalValue(new Date(nextData.filters.startTime)),
+        end: toDatetimeLocalValue(new Date(nextData.filters.endTime)),
+        granularity: nextData.filters.granularity,
+        metric: nextData.filters.metric,
+      }));
+    } catch (error) {
+      console.error("获取仪表盘数据失败:", error);
+      toast.error("获取仪表盘数据失败");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
   };
 
-  const calculateUserTotalUsedFlow = (): number => {
-    // 后端已按计费类型处理流量，前端直接使用入站+出站总和
-    return (userInfo.inFlow || 0) + (userInfo.outFlow || 0);
-  };
-
-  const calculateUsagePercentage = (type: 'flow' | 'forwards'): number => {
-    if (type === 'flow') {
-      const totalUsed = calculateUserTotalUsedFlow();
-      const totalLimit = (userInfo.flow || 0) * 1024 * 1024 * 1024;
-      // 无限制时返回0%
-      if (userInfo.flow === 99999) return 0;
-      return totalLimit > 0 ? Math.min((totalUsed / totalLimit) * 100, 100) : 0;
-    } else if (type === 'forwards') {
-      const totalUsed = forwardList.length;
-      const totalLimit = userInfo.num || 0;
-      // 无限制时返回0%
-      if (userInfo.num === 99999) return 0;
-      return totalLimit > 0 ? Math.min((totalUsed / totalLimit) * 100, 100) : 0;
+  const handlePresetChange = (preset: FlowStatsPreset) => {
+    if (preset === "custom") {
+      setFilters((current) => ({ ...current, preset: "custom" }));
+      return;
     }
-    return 0;
+
+    const nextFilters: FlowStatsFiltersState = {
+      ...filters,
+      ...applyPresetRange(preset),
+      metric: filters.metric,
+    };
+    setFilters(nextFilters);
+    void loadDashboard(nextFilters);
   };
 
-  const getUsageColor = (percentage: number) => {
-    if (percentage >= 90) return 'bg-red-500 dark:bg-red-600';
-    if (percentage >= 70) return 'bg-orange-500 dark:bg-orange-600';
-    return 'bg-blue-500 dark:bg-blue-600';
+  const handleGranularityChange = (granularity: FlowStatsGranularity) => {
+    const nextFilters = { ...filters, granularity };
+    setFilters(nextFilters);
+    void loadDashboard(nextFilters);
   };
 
-  const renderProgressBar = (percentage: number, size: 'sm' | 'md' = 'md', isUnlimited: boolean = false) => {
-    const height = size === 'sm' ? 'h-1.5' : 'h-2';
-    
-    if (isUnlimited) {
-      return (
-        <div className="w-full">
-          <div className={`w-full bg-gradient-to-r from-blue-200 to-purple-200 dark:from-blue-500/30 dark:to-purple-500/30 rounded-full ${height}`}>
-            <div className={`${height} bg-gradient-to-r from-blue-500 to-purple-500 rounded-full w-full opacity-60`}></div>
-          </div>
-        </div>
-      );
-    }
-    
+  const handleMetricChange = (metric: FlowStatsMetric) => {
+    const nextFilters = { ...filters, metric };
+    setFilters(nextFilters);
+    void loadDashboard(nextFilters);
+  };
+
+  const handleApplyCustomRange = () => {
+    void loadDashboard(filters);
+  };
+
+  const activeMetric = data?.filters.metric ?? filters.metric;
+  const isAdmin = data?.meta.scope === "global";
+  const trendChartData = data ? normalizeFlowSeries(data.trendSeries, formatFlow) : [];
+  const { chartData: topRuleChartData, seriesMeta } = data
+    ? buildTopRuleChartData(data.topRuleSeries, activeMetric)
+    : { chartData: [], seriesMeta: [] };
+
+  if (loading) {
     return (
-      <div className="w-full">
-        <div className={`w-full bg-gray-200 dark:bg-gray-800 rounded-full ${height}`}>
-          <div 
-            className={`${height} rounded-full transition-all duration-300 ${getUsageColor(percentage)}`}
-            style={{ width: `${Math.min(percentage, 100)}%` }}
-          ></div>
+      <div className="px-3 lg:px-6 flex-grow pt-2 lg:pt-4">
+        <div className="flex items-center justify-center h-64">
+          <div className="flex items-center gap-3">
+            <div className="animate-spin h-5 w-5 border-2 border-gray-200 dark:border-gray-700 border-t-gray-600 dark:border-t-gray-300 rounded-full" />
+            <span className="text-default-600">正在加载仪表盘...</span>
+          </div>
         </div>
       </div>
     );
-  };
+  }
 
-  const calculateTunnelUsedFlow = (tunnel: UserTunnel): number => {
-    if (!tunnel) return 0;
-    const inFlow = tunnel.inFlow || 0;
-    const outFlow = tunnel.outFlow || 0;
-    // 后端已按计费类型处理流量，前端直接使用入站+出站总和
-    return inFlow + outFlow;
-  };
+  return (
+    <div className="px-3 lg:px-6 py-2 lg:py-4 space-y-6">
+      <Card className="border border-gray-200 dark:border-default-200 shadow-md">
+        <CardBody className="p-4 lg:p-5">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
+            <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end">
+              <Select
+                label="时间范围"
+                size="sm"
+                selectedKeys={[filters.preset]}
+                className="w-full sm:w-48"
+                onSelectionChange={(keys) => {
+                  const preset = Array.from(keys)[0] as FlowStatsPreset | undefined;
+                  if (preset) {
+                    handlePresetChange(preset);
+                  }
+                }}
+              >
+                {PRESET_OPTIONS.map((option) => (
+                  <SelectItem key={option.key}>{option.label}</SelectItem>
+                ))}
+              </Select>
 
-  const calculateTunnelFlowPercentage = (tunnel: UserTunnel): number => {
-    const totalUsed = calculateTunnelUsedFlow(tunnel);
-    const totalLimit = (tunnel.flow || 0) * 1024 * 1024 * 1024;
-    // 无限制时返回0%
-    if (tunnel.flow === 99999) return 0;
-    return totalLimit > 0 ? Math.min((totalUsed / totalLimit) * 100, 100) : 0;
-  };
+              {shouldShowCustomRangeInputs(filters.preset) && (
+                <>
+                  <Input
+                    type="datetime-local"
+                    label="开始时间"
+                    size="sm"
+                    className="w-full sm:w-52"
+                    value={filters.start}
+                    onValueChange={(value) => setFilters((current) => ({ ...current, start: value }))}
+                  />
+                  <Input
+                    type="datetime-local"
+                    label="结束时间"
+                    size="sm"
+                    className="w-full sm:w-52"
+                    value={filters.end}
+                    onValueChange={(value) => setFilters((current) => ({ ...current, end: value }))}
+                  />
+                  <Button color="primary" variant="flat" onPress={handleApplyCustomRange}>
+                    应用
+                  </Button>
+                </>
+              )}
 
-  const getTunnelUsedForwards = (tunnelId: number): number => {
-    return forwardList.filter(forward => forward.tunnelId === tunnelId).length;
-  };
+              <Select
+                label="粒度"
+                size="sm"
+                selectedKeys={[filters.granularity]}
+                className="w-full sm:w-32"
+                onSelectionChange={(keys) => {
+                  const granularity = Array.from(keys)[0] as FlowStatsGranularity | undefined;
+                  if (granularity) {
+                    handleGranularityChange(granularity);
+                  }
+                }}
+              >
+                {GRANULARITY_OPTIONS.map((option) => (
+                  <SelectItem key={option.key}>{option.label}</SelectItem>
+                ))}
+              </Select>
 
-  const calculateTunnelForwardPercentage = (tunnel: UserTunnel): number => {
-    const totalUsed = getTunnelUsedForwards(tunnel.tunnelId);
-    const totalLimit = tunnel.num || 0;
-    // 无限制时返回0%
-    if (tunnel.num === 99999) return 0;
-    return totalLimit > 0 ? Math.min((totalUsed / totalLimit) * 100, 100) : 0;
-  };
+              <Button color="primary" onPress={() => void loadDashboard(filters)} isLoading={refreshing}>
+                刷新
+              </Button>
+            </div>
 
-  const formatResetTime = (resetDay?: number): string => {
-    if (resetDay === undefined || resetDay === null) return '';
-    if (resetDay === 0) return '不重置';
-    
-    const now = new Date();
-    const currentDay = now.getDate();
-    
-    let daysUntilReset;
-    if (resetDay > currentDay) {
-      daysUntilReset = resetDay - currentDay;
-    } else if (resetDay < currentDay) {
-      const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, resetDay);
-      const diffTime = nextMonth.getTime() - now.getTime();
-      daysUntilReset = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-    } else {
-      daysUntilReset = 0;
-    }
-    
-    if (daysUntilReset === 0) {
-      return '今日重置';
-    } else if (daysUntilReset === 1) {
-      return '明日重置';
-    } else {
-      return `${daysUntilReset}天后重置`;
-    }
-  };
-
-  const groupedForwards = () => {
-    const groups: { [key: string]: { tunnelName: string; forwards: Forward[] } } = {};
-    forwardList.forEach(forward => {
-      const tunnelName = forward.tunnelName || '未知隧道';
-      if (!groups[tunnelName]) {
-        groups[tunnelName] = {
-          tunnelName,
-          forwards: []
-        };
-      }
-      groups[tunnelName].forwards.push(forward);
-    });
-    return Object.values(groups);
-  };
-
-  const formatInAddress = (ipString: string, port: number): string => {
-    if (!ipString) return '';
-    
-    const items = ipString.split(',').map(item => item.trim()).filter(item => item);
-    if (items.length === 0) return '';
-    
-    // 检查第一项是否已经包含端口（格式：IP:端口）
-    const firstItem = items[0];
-    const hasPort = /:\d+$/.test(firstItem);
-    
-    if (hasPort) {
-      // inIp 已经包含完整的 IP:Port 组合
-      if (items.length === 1) {
-        return items[0];
-      }
-      return `${items[0]} (+${items.length - 1}个)`;
-    }
-    
-    // inIp 只包含IP，需要添加端口（兼容旧数据）
-    if (!port) return '';
-    
-    if (items.length === 1) {
-      const ip = items[0];
-      if (ip.includes(':') && !ip.startsWith('[')) {
-        return `[${ip}]:${port}`;
-      } else {
-        return `${ip}:${port}`;
-      }
-    }
-    
-    const firstIp = items[0];
-    let formattedFirstIp;
-    if (firstIp.includes(':') && !firstIp.startsWith('[')) {
-      formattedFirstIp = `[${firstIp}]`;
-    } else {
-      formattedFirstIp = firstIp;
-    }
-    
-    return `${formattedFirstIp}:${port} (+${items.length - 1}个)`;
-  };
-
-  const formatRemoteAddress = (remoteAddr: string): string => {
-    if (!remoteAddr) return '';
-    
-    const addresses = remoteAddr.split(',').map(addr => addr.trim()).filter(addr => addr);
-    
-    if (addresses.length === 0) return '';
-    
-    if (addresses.length === 1) {
-      return addresses[0];
-    }
-    
-    return `${addresses[0]} (+${addresses.length - 1})`;
-  };
-
-  const hasMultipleIps = (ipString: string): boolean => {
-    if (!ipString) return false;
-    const ips = ipString.split(',').map(ip => ip.trim()).filter(ip => ip);
-    return ips.length > 1;
-  };
-
-  const hasMultipleRemoteAddresses = (remoteAddr: string): boolean => {
-    if (!remoteAddr) return false;
-    const addresses = remoteAddr.split(',').map(addr => addr.trim()).filter(addr => addr);
-    return addresses.length > 1;
-  };
-
-  const showAddressModal = (ipString: string, port: number, title: string) => {
-    if (!ipString) return;
-    
-    const items = ipString.split(',').map(item => item.trim()).filter(item => item);
-    
-    if (items.length <= 1) {
-      copyToClipboard(formatInAddress(ipString, port));
-      return;
-    }
-    
-    // 检查是否已经包含端口
-    const hasPort = /:\d+$/.test(items[0]);
-    
-    let formattedList;
-    if (hasPort) {
-      // 已经包含完整的 IP:Port 组合，直接使用
-      formattedList = items.map((item, index) => ({
-        id: index,
-        ip: item,
-        address: item,
-        copying: false
-      }));
-    } else {
-      // 只包含IP，需要添加端口
-      formattedList = items.map((ip, index) => {
-        let formattedAddress;
-        if (ip.includes(':') && !ip.startsWith('[')) {
-          formattedAddress = `[${ip}]:${port}`;
-        } else {
-          formattedAddress = `${ip}:${port}`;
-        }
-        return {
-          id: index,
-          ip: ip,
-          address: formattedAddress,
-          copying: false
-        };
-      });
-    }
-    
-    setAddressList(formattedList);
-    setAddressModalTitle(`${title} (${items.length}个)`);
-    setAddressModalOpen(true);
-  };
-
-  const showRemoteAddressModal = (remoteAddr: string, title: string) => {
-    if (!remoteAddr) return;
-    
-    const addresses = remoteAddr.split(',').map(addr => addr.trim()).filter(addr => addr);
-    
-    if (addresses.length <= 1) {
-              copyToClipboard(remoteAddr);
-      return;
-    }
-    
-    const formattedList = addresses.map((address, index) => {
-      return {
-        id: index,
-        ip: address,
-        address: address,
-        copying: false
-      };
-    });
-    
-    setAddressList(formattedList);
-    setAddressModalTitle(`${title} (${addresses.length}个)`);
-    setAddressModalOpen(true);
-  };
-
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(`已复制`);
-    } catch (error) {
-      toast.error('复制失败');
-    }
-  };
-
-  const copyAddress = async (addressItem: AddressItem) => {
-    try {
-      setAddressList(prev => prev.map(item => 
-        item.id === addressItem.id ? { ...item, copying: true } : item
-      ));
-      await copyToClipboard(addressItem.address);
-    } catch (error) {
-      toast.error('复制失败');
-    } finally {
-      setAddressList(prev => prev.map(item => 
-        item.id === addressItem.id ? { ...item, copying: false } : item
-      ));
-    }
-  };
-
-  const copyAllAddresses = async () => {
-    if (addressList.length === 0) return;
-    const allAddresses = addressList.map(item => item.address).join('\n');
-    await copyToClipboard(allAddresses);
-  };
-
-  const calculateForwardBillingFlow = (forward: Forward): number => {
-    if (!forward) return 0;
-    
-    const inFlow = forward.inFlow || 0;
-    const outFlow = forward.outFlow || 0;
-    
-    // 后端已按计费类型处理流量，前端直接使用入站+出站总和
-    return inFlow + outFlow;
-  };
-
-  const handleChartHourSelection = (chartState?: { activeTooltipIndex?: number | string | null }) => {
-    const hourTime = resolveHourTimeFromChartInteraction(flowChartData, chartState?.activeTooltipIndex);
-    if (!hourTime || !resolvedFlowStatsRange) {
-      return;
-    }
-    const selectedPoint = flowChartData.find((item) => item.hourTime === hourTime);
-    if (selectedPoint?.sampled === false) {
-      hourDetailRequestIdRef.current += 1;
-      setSelectedHourTime(hourTime);
-      setHourDetail(null);
-      setHourDetailLoading(false);
-      return;
-    }
-    if (selectedHourTime === hourTime && (hourDetail || hourDetailLoading)) {
-      return;
-    }
-    void loadHourDetail({
-      startTime: resolvedFlowStatsRange.startTime,
-      endTime: resolvedFlowStatsRange.endTime,
-      scope: flowStatsMeta.scope,
-      hourTime,
-    });
-  };
-
-  const selectedHourLabel =
-    hourDetail?.hour?.time ||
-    flowSeries.find((item) => item.hourTime === selectedHourTime)?.time ||
-    "未选择";
-  const selectedFlowPoint = flowSeries.find((item) => item.hourTime === selectedHourTime) ?? null;
-  const selectedHourHasSamplingGap = selectedFlowPoint?.sampled === false;
-  const showForwardOwner = shouldShowForwardOwner(flowStatsMeta.scope);
-  const flowChartData = processFlowChartData();
-
-      if (loading) {
-      return (
-        
-          <div className="px-3 lg:px-6 flex-grow pt-2 lg:pt-4">
-            <div className="flex items-center justify-center h-64">
-              <div className="flex items-center gap-3">
-                <div className="animate-spin h-5 w-5 border-2 border-gray-200 dark:border-gray-700 border-t-gray-600 dark:border-t-gray-300 rounded-full"></div>
-                <span className="text-default-600">正在加载数据...</span>
-              </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {METRIC_OPTIONS.map((option) => (
+                <Button
+                  key={option.key}
+                  size="sm"
+                  radius="full"
+                  color={activeMetric === option.key ? "primary" : "default"}
+                  variant={activeMetric === option.key ? "solid" : "flat"}
+                  onPress={() => handleMetricChange(option.key)}
+                >
+                  {option.label}
+                </Button>
+              ))}
             </div>
           </div>
-        
-      );
-    }
+        </CardBody>
+      </Card>
 
-      return (
-      
-        <div className="px-3 lg:px-6 py-2 lg:py-4">
+      {data?.meta.hasSamplingGap && (
+        <div className="rounded-xl border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-700">
+          当前统计区间存在采样缺口，趋势和排行榜可能偏低，请结合节点状态一起判断。
+        </div>
+      )}
 
-         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4 mb-6 lg:mb-8">
-           {isAdmin ? (
-             <>
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="text-xs lg:text-sm text-default-600">全站用户数</div>
-                   <div className="mt-2 text-base lg:text-xl font-bold text-foreground">{adminOverview?.userCount ?? 0}</div>
-                 </CardBody>
-               </Card>
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="text-xs lg:text-sm text-default-600">全站隧道数</div>
-                   <div className="mt-2 text-base lg:text-xl font-bold text-foreground">{adminOverview?.tunnelCount ?? 0}</div>
-                 </CardBody>
-               </Card>
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="text-xs lg:text-sm text-default-600">全站转发数</div>
-                   <div className="mt-2 text-base lg:text-xl font-bold text-foreground">{adminOverview?.forwardCount ?? 0}</div>
-                 </CardBody>
-               </Card>
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="text-xs lg:text-sm text-default-600">全站累计流量</div>
-                   <div className="mt-2 text-base lg:text-xl font-bold text-foreground">{formatFlow(adminOverview?.totalFlow ?? 0)}</div>
-                 </CardBody>
-               </Card>
-             </>
-           ) : (
-             <>
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="flex flex-col space-y-2">
-                     <div className="flex items-center justify-between">
-                       <p className="text-xs lg:text-sm text-default-600 truncate">总流量</p>
-                       <div className="p-1.5 lg:p-2 bg-blue-100 dark:bg-blue-500/20 rounded-lg flex-shrink-0">
-                         <svg className="w-4 h-4 lg:w-5 lg:h-5 text-blue-600 dark:text-blue-400" fill="currentColor" viewBox="0 0 20 20">
-                           <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zM14 9a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1v-6a1 1 0 00-1-1h-2z" />
-                         </svg>
-                       </div>
-                     </div>
-                     <p className="text-base lg:text-xl font-bold text-foreground truncate">{formatFlow(userInfo.flow, 'gb')}</p>
-                   </div>
-                 </CardBody>
-               </Card>
-
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="flex flex-col space-y-2">
-                     <div className="flex items-center justify-between">
-                       <p className="text-xs lg:text-sm text-default-600 truncate">已用流量</p>
-                       <div className="p-1.5 lg:p-2 bg-green-100 dark:bg-green-500/20 rounded-lg flex-shrink-0">
-                         <svg className="w-4 h-4 lg:w-5 lg:h-5 text-green-600 dark:text-green-400" fill="currentColor" viewBox="0 0 20 20">
-                           <path fillRule="evenodd" d="M12 7a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0V8.414l-4.293 4.293a1 1 0 01-1.414 0L8 10.414l-4.293 4.293a1 1 0 01-1.414-1.414l5-5a1 1 0 011.414 0L11 10.586 14.586 7H12z" clipRule="evenodd" />
-                         </svg>
-                       </div>
-                     </div>
-                     <p className="text-base lg:text-xl font-bold text-foreground truncate">{formatFlow(calculateUserTotalUsedFlow())}</p>
-                     <div className="mt-1">
-                       {renderProgressBar(calculateUsagePercentage('flow'), 'sm', userInfo.flow === 99999)}
-                       <div className="flex items-center justify-between mt-1">
-                         <p className="text-xs text-default-500 truncate">
-                           {userInfo.flow === 99999 ? '无限制' : `${calculateUsagePercentage('flow').toFixed(1)}%`}
-                         </p>
-                         {(userInfo.flowResetTime !== undefined && userInfo.flowResetTime !== null) && (
-                           <div className="text-xs text-default-500 flex items-center gap-1">
-                             <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
-                               <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
-                             </svg>
-                             <span className="truncate">{formatResetTime(userInfo.flowResetTime)}</span>
-                           </div>
-                         )}
-                       </div>
-                     </div>
-                   </div>
-                 </CardBody>
-               </Card>
-
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="flex flex-col space-y-2">
-                     <div className="flex items-center justify-between">
-                       <p className="text-xs lg:text-sm text-default-600 truncate">转发配额</p>
-                       <div className="p-1.5 lg:p-2 bg-purple-100 dark:bg-purple-500/20 rounded-lg flex-shrink-0">
-                         <svg className="w-4 h-4 lg:w-5 lg:h-5 text-purple-600 dark:text-purple-400" fill="currentColor" viewBox="0 0 20 20">
-                           <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-                         </svg>
-                       </div>
-                     </div>
-                     <p className="text-base lg:text-xl font-bold text-foreground truncate">{formatNumber(userInfo.num || 0)}</p>
-                   </div>
-                 </CardBody>
-               </Card>
-
-               <Card className="border border-gray-200 dark:border-default-200 shadow-md hover:shadow-lg transition-shadow">
-                 <CardBody className="p-3 lg:p-4">
-                   <div className="flex flex-col space-y-2">
-                     <div className="flex items-center justify-between">
-                       <p className="text-xs lg:text-sm text-default-600 truncate">已用转发</p>
-                       <div className="p-1.5 lg:p-2 bg-orange-100 dark:bg-orange-500/20 rounded-lg flex-shrink-0">
-                         <svg className="w-4 h-4 lg:w-5 lg:h-5 text-orange-600 dark:text-orange-400" fill="currentColor" viewBox="0 0 20 20">
-                           <path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" />
-                         </svg>
-                       </div>
-                     </div>
-                     <p className="text-base lg:text-xl font-bold text-foreground truncate">{forwardList.length}</p>
-                     <div className="mt-1">
-                       {renderProgressBar(calculateUsagePercentage('forwards'), 'sm', userInfo.num === 99999)}
-                       <p className="text-xs text-default-500 mt-1 truncate">
-                         {userInfo.num === 99999 ? '无限制' : `${calculateUsagePercentage('forwards').toFixed(1)}%`}
-                       </p>
-                     </div>
-                   </div>
-                 </CardBody>
-               </Card>
-             </>
-           )}
-         </div>
-
-         {/* 流量统计图表 */}
-         <Card className="mb-6 lg:mb-8 border border-gray-200 dark:border-default-200 shadow-md">
-           <CardHeader className="pb-3">
-             <div className="flex w-full flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
-               <div className="flex items-center gap-2">
-                 <svg className="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 20 20">
-                   <path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z" />
-                   <path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z" />
-                 </svg>
-                 <h2 className="text-lg lg:text-xl font-semibold text-foreground">每小时增量流量</h2>
-               </div>
-               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,220px)_minmax(0,220px)_auto] lg:items-end">
-                 <Input
-                   type="datetime-local"
-                   label="开始时间"
-                   size="sm"
-                   value={flowStatsRange.start}
-                   onValueChange={(value) => setFlowStatsRange((prev) => ({ ...prev, start: value }))}
-                 />
-                 <Input
-                   type="datetime-local"
-                   label="结束时间"
-                   size="sm"
-                   value={flowStatsRange.end}
-                   onValueChange={(value) => setFlowStatsRange((prev) => ({ ...prev, end: value }))}
-                 />
-                 <Button color="primary" onPress={handleFlowStatsQuery} isLoading={flowStatsLoading}>
-                   查询
-                 </Button>
-               </div>
-             </div>
-           </CardHeader>
-           <CardBody className="pt-0">
-             {flowSeries.length === 0 ? (
-               <div className="text-center py-12">
-                 <svg className="w-12 h-12 text-default-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                 </svg>
-                 <p className="text-default-500">暂无流量统计数据</p>
-               </div>
-             ) : (
-               <div className="space-y-4">
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                    <Card className="border border-divider shadow-none">
-                      <CardBody className="p-4">
-                        <div className="text-xs uppercase tracking-wide text-default-500">当前时间段总量</div>
-                        <div className="mt-2 text-lg font-semibold text-foreground">{formatFlow(flowStatsSummary.totalFlow)}</div>
-                      </CardBody>
-                    </Card>
-                    <Card className="border border-divider shadow-none">
-                      <CardBody className="p-4">
-                        <div className="text-xs uppercase tracking-wide text-default-500">当前时间段入站</div>
-                        <div className="mt-2 text-lg font-semibold text-green-600 dark:text-green-400">{formatFlow(flowStatsSummary.totalInFlow)}</div>
-                      </CardBody>
-                    </Card>
-                    <Card className="border border-divider shadow-none">
-                      <CardBody className="p-4">
-                        <div className="text-xs uppercase tracking-wide text-default-500">当前时间段出站</div>
-                        <div className="mt-2 text-lg font-semibold text-orange-600 dark:text-orange-400">{formatFlow(flowStatsSummary.totalOutFlow)}</div>
-                      </CardBody>
-                    </Card>
-                  </div>
-
-                  {flowStatsMeta.hasSamplingGap && (
-                    <div className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-700">
-                      统计区间存在采样缺口，总量可能偏低。常见原因是服务重启、掉线或定时任务漏跑。
-                    </div>
-                  )}
-
-                  <div className="h-64 lg:h-80 w-full">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart
-                        data={flowChartData}
-                        onMouseMove={(chartState) => handleChartHourSelection(chartState)}
-                        onClick={(chartState) => handleChartHourSelection(chartState)}
-                      >
-                        <CartesianGrid strokeDasharray="3 3" className="opacity-30" />
-                        <XAxis
-                          dataKey="label"
-                          tick={{ fontSize: 12 }}
-                          tickLine={false}
-                          axisLine={{ stroke: '#e5e7eb', strokeWidth: 1 }}
-                        />
-                        <YAxis
-                          tick={{ fontSize: 12 }}
-                          tickLine={false}
-                          axisLine={{ stroke: '#e5e7eb', strokeWidth: 1 }}
-                          tickFormatter={(value) => {
-                            if (value === 0) return '0';
-                            if (value < 1024) return `${value}B`;
-                            if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}K`;
-                            if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)}M`;
-                            return `${(value / (1024 * 1024 * 1024)).toFixed(1)}G`;
-                          }}
-                        />
-                        <Tooltip
-                          content={({ active, payload, label }) => {
-                            if (active && payload && payload.length) {
-                              const point = payload[0]?.payload as { sampled?: boolean; inFlow?: number | null; outFlow?: number | null };
-                              if (point?.sampled === false) {
-                                return (
-                                  <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3">
-                                    <p className="font-medium text-foreground">{`时间: ${label}`}</p>
-                                    <p className="text-warning-600">该小时无采样数据</p>
-                                  </div>
-                                );
-                              }
-                              return (
-                                <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3">
-                                  <p className="font-medium text-foreground">{`时间: ${label}`}</p>
-                                  <p className="text-default-600">{`入站: ${formatFlow(point?.inFlow || 0)}`}</p>
-                                  <p className="text-default-600">{`出站: ${formatFlow(point?.outFlow || 0)}`}</p>
-                                  <p className="text-primary">{`流量: ${formatFlow(payload[0]?.value as number || 0)}`}</p>
-                                </div>
-                              );
-                            }
-                            return null;
-                          }}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="flow"
-                          stroke="#8b5cf6"
-                          strokeWidth={3}
-                          connectNulls={false}
-                          dot={false}
-                          activeDot={{ r: 4, stroke: '#8b5cf6', strokeWidth: 2, fill: '#fff' }}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-
-                  <div className="rounded-xl border border-divider">
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-divider bg-default-50">
-                      <div>
-                        <div className="text-sm font-semibold text-foreground">{getForwardStatsHeading(flowStatsMeta.rankingMode)}</div>
-                        <div className="text-xs text-default-500">
-                          当前返回 {flowStatsMeta.returnedRuleCount} 条，统计范围共 {flowStatsMeta.totalRuleCount} 条规则
-                        </div>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="light"
-                        onPress={() => setIsForwardStatsCollapsed((prev) => !prev)}
-                      >
-                        {isForwardStatsCollapsed ? "展开" : "收起"}
-                      </Button>
-                    </div>
-                    {!isForwardStatsCollapsed && (
-                      <div className="overflow-x-auto">
-                        <table className="min-w-full divide-y divide-divider bg-content1">
-                          <thead className="bg-default-50">
-                            <tr>
-                              {showForwardOwner && <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">所属用户</th>}
-                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">转发</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">隧道</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">入口地址</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">目标地址</th>
-                              <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">入站</th>
-                              <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">出站</th>
-                              <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">总量</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-divider">
-                            {forwardFlowStats.length === 0 ? (
-                              <tr>
-                                <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-default-500">
-                                  当前时间范围内暂无转发流量数据
-                                </td>
-                              </tr>
-                            ) : (
-                              forwardFlowStats.map((item) => (
-                                <tr key={item.id} className="hover:bg-default-50/80">
-                                  {showForwardOwner && <td className="px-4 py-3 text-sm text-default-600">{item.userName || "-"}</td>}
-                                  <td className="px-4 py-3 text-sm font-medium text-foreground">{item.name}</td>
-                                  <td className="px-4 py-3 text-sm text-default-600">{item.tunnelName}</td>
-                                  <td className="px-4 py-3 text-sm text-default-600">{item.inAddress || "-"}</td>
-                                  <td className="px-4 py-3 text-sm text-default-600">{item.remoteAddr || "-"}</td>
-                                  <td className="px-4 py-3 text-right text-sm text-default-600">{formatFlow(item.inFlow)}</td>
-                                  <td className="px-4 py-3 text-right text-sm text-default-600">{formatFlow(item.outFlow)}</td>
-                                  <td className="px-4 py-3 text-right text-sm font-semibold text-foreground">{formatFlow(item.flow)}</td>
-                                </tr>
-                              ))
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="rounded-xl border border-divider">
-                      <div className="flex flex-col gap-2 px-4 py-3 border-b border-divider bg-default-50 md:flex-row md:items-center md:justify-between">
-                      <div>
-                        <div className="text-sm font-semibold text-foreground">{getHourDetailHeading()}</div>
-                        <div className="text-xs text-default-500">选中时间：{selectedHourLabel}</div>
-                      </div>
-                      <div className="text-xs text-default-500">
-                        {selectedHourHasSamplingGap
-                          ? "该小时无采样数据，常见于服务重启/任务漏跑"
-                          : hourDetail
-                          ? `入站 ${formatFlow(hourDetail.summary.totalInFlow)} / 出站 ${formatFlow(hourDetail.summary.totalOutFlow)} / 总量 ${formatFlow(hourDetail.summary.totalFlow)}`
-                          : "移动或点击图表上的小时点位查看明细"}
-                      </div>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="min-w-full divide-y divide-divider bg-content1">
-                        <thead className="bg-default-50">
-                          <tr>
-                            {showForwardOwner && <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">所属用户</th>}
-                            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">转发</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">隧道</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">入口地址</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-default-600">目标地址</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">入站</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">出站</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-default-600">总量</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-divider">
-                          {hourDetailLoading ? (
-                            <tr>
-                              <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-default-500">
-                                正在加载该小时流量明细...
-                              </td>
-                            </tr>
-                          ) : selectedHourHasSamplingGap ? (
-                            <tr>
-                              <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-warning-600">
-                                该小时无采样数据，常见于服务重启或定时任务漏跑
-                              </td>
-                            </tr>
-                          ) : !hourDetail || hourDetail.rows.length === 0 ? (
-                            <tr>
-                              <td colSpan={showForwardOwner ? 8 : 7} className="px-4 py-6 text-center text-sm text-default-500">
-                                该小时暂无规则流量明细
-                              </td>
-                            </tr>
-                          ) : (
-                            hourDetail.rows.map((item) => (
-                              <tr key={`${hourDetail.hour.hourTime}-${item.id}`} className="hover:bg-default-50/80">
-                                {showForwardOwner && <td className="px-4 py-3 text-sm text-default-600">{item.userName || "-"}</td>}
-                                <td className="px-4 py-3 text-sm font-medium text-foreground">{item.name}</td>
-                                <td className="px-4 py-3 text-sm text-default-600">{item.tunnelName}</td>
-                                <td className="px-4 py-3 text-sm text-default-600">{item.inAddress || "-"}</td>
-                                <td className="px-4 py-3 text-sm text-default-600">{item.remoteAddr || "-"}</td>
-                                <td className="px-4 py-3 text-right text-sm text-default-600">{formatFlow(item.inFlow)}</td>
-                                <td className="px-4 py-3 text-right text-sm text-default-600">{formatFlow(item.outFlow)}</td>
-                                <td className="px-4 py-3 text-right text-sm font-semibold text-foreground">{formatFlow(item.flow)}</td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-               </div>
-             )}
-           </CardBody>
-         </Card>
-
-                 {/* 隧道权限 - 管理员不显示 */}
-         {!isAdmin && (
-          <Card className="mb-6 lg:mb-8 border border-gray-200 dark:border-default-200 shadow-md">
-           <CardHeader className="pb-3">
-             <div className="flex items-center gap-2">
-               <svg className="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 20 20">
-                 <path fillRule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clipRule="evenodd" />
-               </svg>
-               <h2 className="text-lg lg:text-xl font-semibold text-foreground">隧道权限</h2>
-               <span className="px-2 py-1 bg-default-100 dark:bg-default-50 text-default-600 rounded-full text-xs">
-                 {userTunnels.length}
-               </span>
-             </div>
-           </CardHeader>
-           <CardBody className="pt-0">
-            {userTunnels.length === 0 ? (
-              <div className="text-center py-12">
-                <svg className="w-12 h-12 text-default-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4" />
-                </svg>
-                <p className="text-default-500">暂无隧道权限</p>
-              </div>
-            ) : (
-                             <div className="space-y-3">
-                 {userTunnels.map((tunnel) => {
-                   const tunnelExpStatus = getExpStatus(tunnel.expTime);
-                   return (
-                     <div key={tunnel.id} className="border border-gray-200 dark:border-default-100 rounded-lg p-3 lg:p-4 hover:shadow-md transition-shadow">
-                       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-3">
-                         <div>
-                           <h3 className="font-semibold text-foreground">{tunnel.tunnelName} ID: {tunnel.id}</h3>
-                           <div className="flex flex-wrap items-center gap-2 mt-1">
-                             <span className={`px-2 py-1 rounded-md text-xs font-medium ${tunnel.tunnelFlow === 1 ? 'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300' : 'bg-orange-100 dark:bg-orange-500/20 text-orange-700 dark:text-orange-300'}`}>
-                               {tunnel.tunnelFlow === 1 ? '单向计费' : '双向计费'}
-                             </span>
-                             <span className={`px-2 py-1 rounded-md text-xs font-medium border ${tunnelExpStatus.bg} ${tunnelExpStatus.color}`}>
-                               {tunnelExpStatus.text}
-                             </span>
-                             {(tunnel.flowResetTime !== undefined && tunnel.flowResetTime !== null) && (
-                               <span className="text-xs text-default-500">
-                                 {formatResetTime(tunnel.flowResetTime)}
-                               </span>
-                             )}
-                           </div>
-                         </div>
-                       </div>
-                       
-                       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">
-                         <div>
-                           <p className="text-sm text-default-600 mb-1">流量配额</p>
-                           <p className="font-semibold text-foreground">{formatFlow(tunnel.flow, 'gb')}</p>
-                         </div>
-                         <div>
-                           <p className="text-sm text-default-600 mb-1">已用流量</p>
-                           <p className="font-semibold text-foreground">{formatFlow(calculateTunnelUsedFlow(tunnel))}</p>
-                           <div className="mt-1">
-                             {renderProgressBar(calculateTunnelFlowPercentage(tunnel), 'sm', tunnel.flow === 99999)}
-                           </div>
-                         </div>
-                         <div>
-                           <p className="text-sm text-default-600 mb-1">转发配额</p>
-                           <p className="font-semibold text-foreground">{formatNumber(tunnel.num)}</p>
-                         </div>
-                         <div>
-                           <p className="text-sm text-default-600 mb-1">已用转发</p>
-                           <p className="font-semibold text-foreground">{getTunnelUsedForwards(tunnel.tunnelId)}</p>
-                           <div className="mt-1">
-                             {renderProgressBar(calculateTunnelForwardPercentage(tunnel), 'sm', tunnel.num === 99999)}
-                           </div>
-                         </div>
-                       </div>
-                     </div>
-                   );
-                 })}
-               </div>
-            )}
-          </CardBody>
-        </Card>
-         )}
-
-                 {/* 转发配置 */}
-         <Card className="border border-gray-200 dark:border-default-200 shadow-md">
-           <CardHeader className="pb-3">
-             <div className="flex items-center gap-2">
-               <svg className="w-5 h-5 text-primary" fill="currentColor" viewBox="0 0 20 20">
-                 <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clipRule="evenodd" />
-               </svg>
-               <h2 className="text-lg lg:text-xl font-semibold text-foreground">转发配置</h2>
-               <span className="px-2 py-1 bg-default-100 dark:bg-default-50 text-default-600 rounded-full text-xs">
-                 {forwardList.length}
-               </span>
-             </div>
-           </CardHeader>
-           <CardBody className="pt-0">
-            {groupedForwards().length === 0 ? (
-              <div className="text-center py-12">
-                <svg className="w-12 h-12 text-default-400 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 9l4-4 4 4m0 6l-4 4-4-4" />
-                </svg>
-                <p className="text-default-500">暂无转发配置</p>
-              </div>
-            ) : (
-                             <div className="space-y-4">
-                 {groupedForwards().map((group) => (
-                   <div key={group.tunnelName} className="border border-gray-200 dark:border-default-100 rounded-lg p-3 lg:p-4">
-                     <div className="flex items-center justify-between mb-3">
-                       <h3 className="font-semibold text-foreground">{group.tunnelName}</h3>
-                       <span className="px-2 py-1 bg-primary-100 dark:bg-primary-500/20 text-primary-700 dark:text-primary-300 rounded-md text-sm">
-                         {group.forwards.length} 个转发
-                       </span>
-                     </div>
-                     
-                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-                       {group.forwards.map((forward) => (
-                        <div key={forward.id} className="bg-white dark:bg-default-100/50 border border-gray-200 dark:border-default-200 rounded-lg p-3 hover:shadow-md transition-shadow">
-                          <div className="space-y-3">
-                            <div>
-                              <h4 className="font-medium text-foreground text-sm mb-2 truncate">{forward.name}</h4>
-                              {isAdmin && forward.userName && (
-                                <div className="mb-2 text-xs text-default-500">所属用户：{forward.userName}</div>
-                              )}
-                              <div className="space-y-1">
-                                <code 
-                                  className={`block px-2 py-1 bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-300 rounded font-mono text-xs truncate ${hasMultipleIps(forward.inIp) ? 'cursor-pointer hover:bg-green-200 dark:hover:bg-green-500/30' : ''}`}
-                                  onClick={() => hasMultipleIps(forward.inIp) && showAddressModal(forward.inIp, forward.inPort, '入口地址')}
-                                  title={formatInAddress(forward.inIp, forward.inPort)}
-                                >
-                                  {formatInAddress(forward.inIp, forward.inPort)}
-                                </code>
-                                <div className="text-center text-default-400 text-xs">↓</div>
-                                <code 
-                                  className={`block px-2 py-1 bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300 rounded font-mono text-xs truncate ${hasMultipleRemoteAddresses(forward.remoteAddr) ? 'cursor-pointer hover:bg-blue-200 dark:hover:bg-blue-500/30' : ''}`}
-                                  onClick={() => hasMultipleRemoteAddresses(forward.remoteAddr) && showRemoteAddressModal(forward.remoteAddr, '出口地址')}
-                                  title={formatRemoteAddress(forward.remoteAddr)}
-                                >
-                                  {formatRemoteAddress(forward.remoteAddr)}
-                                </code>
-                              </div>
-                            </div>
-                            
-                            <div className="pt-2 border-t border-gray-200 dark:border-default-200">
-                              <div className="grid grid-cols-3 gap-1 text-xs">
-                                <div className="text-center">
-                                  <div className="text-default-500 mb-1">上传</div>
-                                  <div className="font-medium text-green-600 dark:text-green-400 truncate">{formatFlow(forward.inFlow || 0)}</div>
-                                </div>
-                                <div className="text-center">
-                                  <div className="text-default-500 mb-1">下载</div>
-                                  <div className="font-medium text-orange-600 dark:text-orange-400 truncate">{formatFlow(forward.outFlow || 0)}</div>
-                                </div>
-                                <div className="text-center">
-                                  <div className="text-default-500 mb-1">计费</div>
-                                  <div className="font-medium text-primary truncate">{formatFlow(calculateForwardBillingFlow(forward))}</div>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
-        </Card>
-
-        {/* 地址列表弹窗 */}
-        <Modal isOpen={addressModalOpen} onClose={() => setAddressModalOpen(false)} size="2xl" 
-        scrollBehavior="outside"
-        backdrop="blur"
-        placement="center">
-          <ModalContent>
-            <ModalHeader className="text-base">{addressModalTitle}</ModalHeader>
-            <ModalBody className="pb-6">
-              <div className="mb-4 text-right">
-                <Button size="sm" onClick={copyAllAddresses}>
-                  复制全部
-                </Button>
-              </div>
-              
-              <div className="space-y-2 max-h-60 overflow-y-auto">
-                {addressList.map((item) => (
-                  <div key={item.id} className="flex justify-between items-center p-3 border border-default-200 dark:border-default-100 rounded-lg">
-                    <code className="text-sm flex-1 mr-3 text-foreground">{item.address}</code>
-                    <Button
-                      size="sm"
-                      variant="light"
-                      isLoading={item.copying}
-                      onClick={() => copyAddress(item)}
-                    >
-                      复制
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </ModalBody>
-          </ModalContent>
-        </Modal>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {buildSummaryCards(isAdmin, data).map((item) => (
+          <Card key={item.title} className="border border-gray-200 dark:border-default-200 shadow-md">
+            <CardBody className="p-4">
+              <div className="text-sm text-default-500">{item.title}</div>
+              <div className="mt-2 text-2xl font-semibold text-foreground">{item.value}</div>
+              {item.subtitle && <div className="mt-2 text-xs text-default-500">{item.subtitle}</div>}
+            </CardBody>
+          </Card>
+        ))}
       </div>
-          
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <RankingCard
+          title={data?.rankings.leftTitle || "排行榜"}
+          rows={data?.rankings.left || []}
+          metric={activeMetric}
+          emptyText={isAdmin ? "当前时间范围内暂无用户流量数据" : "当前时间范围内暂无隧道流量数据"}
+        />
+        <RankingCard
+          title={data?.rankings.rightTitle || "排行榜"}
+          rows={data?.rankings.right || []}
+          metric={activeMetric}
+          emptyText={isAdmin ? "当前时间范围内暂无转发流量数据" : "当前时间范围内暂无我的转发流量数据"}
+        />
+      </div>
+
+      <Card className="border border-gray-200 dark:border-default-200 shadow-md">
+        <CardHeader className="pb-0">
+          <div className="text-lg font-semibold text-foreground">流量趋势</div>
+        </CardHeader>
+        <CardBody>
+          {trendChartData.length === 0 ? (
+            <EmptyState text="当前时间范围内暂无趋势数据" />
+          ) : (
+            <div className="h-80">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trendChartData}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="label" tick={{ fontSize: 12 }} tickLine={false} />
+                  <YAxis tick={{ fontSize: 12 }} tickLine={false} tickFormatter={formatFlowAxisTick} />
+                  <Tooltip
+                    content={({ active, payload, label }) => {
+                      if (!active || !payload || !payload.length) {
+                        return null;
+                      }
+                      const point = payload[0]?.payload as FlowChartPoint;
+                      if (point.sampled === false) {
+                        return (
+                          <TooltipBox
+                            title={String(label)}
+                            rows={[{ label: "状态", value: "该时段无采样数据" }]}
+                          />
+                        );
+                      }
+                      return (
+                        <TooltipBox
+                          title={String(label)}
+                          rows={[
+                            { label: "总流量", value: formatFlow(point.flow ?? 0) },
+                            { label: "入站", value: formatFlow(point.inFlow ?? 0) },
+                            { label: "出站", value: formatFlow(point.outFlow ?? 0) },
+                          ]}
+                        />
+                      );
+                    }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey={activeMetric}
+                    stroke={METRIC_COLORS[activeMetric]}
+                    strokeWidth={3}
+                    dot={false}
+                    connectNulls={false}
+                    activeDot={{ r: 4, strokeWidth: 2 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card className="border border-gray-200 dark:border-default-200 shadow-md">
+        <CardHeader className="pb-0">
+          <div>
+            <div className="text-lg font-semibold text-foreground">Top12 转发规则趋势</div>
+          </div>
+        </CardHeader>
+        <CardBody>
+          {topRuleChartData.length === 0 || seriesMeta.length === 0 ? (
+            <EmptyState text="当前时间范围内暂无规则趋势数据" />
+          ) : (
+            <div className="h-96">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={topRuleChartData}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
+                  <XAxis dataKey="label" tick={{ fontSize: 12 }} tickLine={false} />
+                  <YAxis tick={{ fontSize: 12 }} tickLine={false} tickFormatter={formatFlowAxisTick} />
+                  <Tooltip
+                    content={({ active, payload, label }) => {
+                      if (!active || !payload) {
+                        return null;
+                      }
+
+                      const sampled = (payload[0]?.payload as { sampled?: boolean } | undefined)?.sampled;
+                      if (sampled === false) {
+                        return (
+                          <TooltipBox
+                            title={String(label)}
+                            rows={[{ label: "状态", value: "该时段无采样数据" }]}
+                          />
+                        );
+                      }
+
+                      const rows = payload
+                        .filter((item) => item.value !== null && item.value !== undefined)
+                        .map((item) => ({
+                          label: String(item.name || ""),
+                          value: formatFlow(Number(item.value || 0)),
+                        }));
+
+                      return <TooltipBox title={String(label)} rows={rows} />;
+                    }}
+                  />
+                  <Legend />
+                  {seriesMeta.map((item) => (
+                    <Line
+                      key={item.key}
+                      type="monotone"
+                      dataKey={item.key}
+                      name={item.userName ? `${item.name} (${item.userName})` : item.name}
+                      stroke={item.color}
+                      strokeWidth={2}
+                      dot={false}
+                      connectNulls={false}
+                    />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </CardBody>
+      </Card>
+    </div>
   );
-} 
+}
+
+function RankingCard({
+  title,
+  rows,
+  metric,
+  emptyText,
+}: {
+  title: string;
+  rows: RankingItem[];
+  metric: FlowStatsMetric;
+  emptyText: string;
+}) {
+  const visibleRows = rows.slice(0, MAX_RANKING_ROWS);
+  const maxValue = visibleRows.reduce((current, item) => Math.max(current, metricValue(item, metric)), 0);
+
+  return (
+    <Card className="border border-gray-200 dark:border-default-200 shadow-md">
+      <CardHeader className="pb-0">
+        <div className="text-lg font-semibold text-foreground">{title}</div>
+      </CardHeader>
+      <CardBody>
+        {visibleRows.length === 0 ? (
+          <EmptyState text={emptyText} />
+        ) : (
+          <div className="space-y-4">
+            {visibleRows.map((item, index) => {
+              const value = metricValue(item, metric);
+              const width = maxValue > 0 ? `${(value / maxValue) * 100}%` : "0%";
+              return (
+                <div key={`${title}-${item.id}`} className="space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-foreground truncate">
+                        {index + 1}. {item.name}
+                      </div>
+                      {item.secondaryName && <div className="text-xs text-default-500 truncate">{item.secondaryName}</div>}
+                    </div>
+                    <div className="text-sm font-semibold text-foreground whitespace-nowrap">{formatFlow(value)}</div>
+                  </div>
+                  <div className="h-2 rounded-full bg-default-100 overflow-hidden">
+                    <div className="h-full rounded-full bg-primary" style={{ width }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return <div className="py-12 text-center text-sm text-default-500">{text}</div>;
+}
+
+function TooltipBox({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: Array<{ label: string; value: string }>;
+}) {
+  return (
+    <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3 min-w-[180px]">
+      <div className="text-sm font-medium text-foreground mb-2">{title}</div>
+      <div className="space-y-1">
+        {rows.map((row) => (
+          <div key={`${title}-${row.label}`} className="flex items-center justify-between gap-3 text-xs text-default-600">
+            <span>{row.label}</span>
+            <span>{row.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function buildSummaryCards(isAdmin: boolean, data: FlowStatsResponse | null) {
+  if (!data) {
+    return [];
+  }
+
+  if (isAdmin) {
+    return [
+      {
+        title: "用户总数",
+        value: formatCount(data.overviewCards.userCount ?? 0),
+      },
+      {
+        title: "转发总数",
+        value: formatCount(data.overviewCards.forwardCount ?? 0),
+        subtitle: `隧道数 ${formatCount(data.overviewCards.tunnelCount ?? 0)}`,
+      },
+      {
+        title: "当前周期总流量",
+        value: formatFlow(data.summary.totalFlow),
+        subtitle: `入站 ${formatFlow(data.summary.totalInFlow)} / 出站 ${formatFlow(data.summary.totalOutFlow)}`,
+      },
+      {
+        title: "峰值时段",
+        value: formatPeakTime(data.overviewCards.peakBucketTime),
+        subtitle: `峰值 ${formatFlow(data.overviewCards.peakBucketValue ?? 0)}`,
+      },
+    ];
+  }
+
+  return [
+    {
+      title: "套餐总流量",
+      value: formatFlowLimit(data.overviewCards.flowLimit),
+    },
+    {
+      title: "当前周期已用",
+      value: formatFlow(data.overviewCards.usedFlow ?? data.summary.totalFlow),
+      subtitle: `入站 ${formatFlow(data.summary.totalInFlow)} / 出站 ${formatFlow(data.summary.totalOutFlow)}`,
+    },
+    {
+      title: "转发配额 / 已用",
+      value: `${formatCount(data.overviewCards.usedForwardCount ?? 0)} / ${formatForwardLimit(data.overviewCards.forwardLimit)}`,
+    },
+    {
+      title: "峰值时段",
+      value: formatPeakTime(data.overviewCards.peakBucketTime),
+      subtitle: `峰值 ${formatFlow(data.overviewCards.peakBucketValue ?? 0)}`,
+    },
+  ];
+}
+
+function metricValue(item: RankingItem, metric: FlowStatsMetric): number {
+  if (metric === "inFlow") {
+    return item.inFlow || 0;
+  }
+  if (metric === "outFlow") {
+    return item.outFlow || 0;
+  }
+  return item.flow || 0;
+}
+
+function formatFlow(value: number): string {
+  if (value === 99999) {
+    return "无限制";
+  }
+  if (!value) {
+    return "0 B";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(2)} KB`;
+  }
+  if (value < 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  }
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatFlowLimit(value?: number): string {
+  if (value === undefined || value === null) {
+    return "-";
+  }
+  if (value === 99999) {
+    return "无限制";
+  }
+  return `${value} GB`;
+}
+
+function formatForwardLimit(value?: number): string {
+  if (value === undefined || value === null) {
+    return "-";
+  }
+  if (value === 99999) {
+    return "无限制";
+  }
+  return String(value);
+}
+
+function formatCount(value: number): string {
+  return String(value || 0);
+}
+
+function formatPeakTime(value?: number | null): string {
+  if (!value) {
+    return "暂无峰值";
+  }
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+function formatFlowAxisTick(value: number): string {
+  if (value === 0) {
+    return "0";
+  }
+  if (value < 1024) {
+    return `${value}B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)}K`;
+  }
+  if (value < 1024 * 1024 * 1024) {
+    return `${(value / (1024 * 1024)).toFixed(1)}M`;
+  }
+  return `${(value / (1024 * 1024 * 1024)).toFixed(1)}G`;
+}

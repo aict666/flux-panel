@@ -44,7 +44,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     private static final long MAX_FLOW_STATS_RANGE_MILLIS = ChronoUnit.DAYS.getDuration().toMillis() * 30;
     private static final DateTimeFormatter LEGACY_HOUR_FORMATTER = DateTimeFormatter.ofPattern("HH:mm");
     private static final DateTimeFormatter RANGE_HOUR_FORMATTER = DateTimeFormatter.ofPattern("MM-dd HH:mm");
-    private static final int USER_FORWARD_STATS_LIMIT = 10;
+    private static final DateTimeFormatter RANGE_DAY_FORMATTER = DateTimeFormatter.ofPattern("MM-dd");
+    private static final int TOP_RULE_LIMIT = 12;
 
     @Resource
     @Lazy
@@ -206,32 +207,64 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             return R.err(validationError);
         }
 
+        GranularityType granularityType = parseGranularityType(flowStatsQueryDto.getGranularity());
+        if (granularityType == null) {
+            return R.err("粒度只支持 hour/day");
+        }
+
+        MetricType metricType = parseMetricType(flowStatsQueryDto.getMetric());
+        if (metricType == null) {
+            return R.err("统计指标只支持 flow/inFlow/outFlow");
+        }
+
         NormalizedRange range = normalizeRange(flowStatsQueryDto.getStartTime(), flowStatsQueryDto.getEndTime());
         long currentHour = truncateToHour(System.currentTimeMillis());
         List<UserPackageDto.UserForwardDetailDto> forwards = loadForwardDetails(adminScope, user.getId());
         fillForwardInIpAndPort(forwards);
-        List<UserPackageFlowStatsDto.SeriesPointDto> series = buildSeries(adminScope ? null : user.getId(), range, currentHour);
-        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> allForwardStats = buildForwardStats(adminScope ? null : user.getId(), range, forwards, currentHour);
-        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> visibleForwardStats = adminScope
-                ? allForwardStats
-                : allForwardStats.stream().limit(USER_FORWARD_STATS_LIMIT).toList();
+
+        Long scopedUserId = adminScope ? null : user.getId();
+        List<StatisticsFlow> userBuckets = loadUserBucketsWithRealtime(scopedUserId, range, currentHour);
+        List<ForwardStatisticsFlow> forwardBuckets = loadForwardBucketsWithRealtime(scopedUserId, range, forwards, currentHour);
+
+        FlowStatsSeriesSupport.SeriesBuildResult trendResult = buildTrendSeries(userBuckets, range, granularityType);
+        List<UserPackageFlowStatsDto.SeriesPointDto> trendSeries = trendResult.getSeries();
+        UserPackageFlowStatsDto.SummaryDto summary = buildSummaryFromSeries(trendSeries);
+        PeakPoint peakPoint = findPeakPoint(trendSeries, metricType);
+        List<UserPackageFlowStatsDto.ForwardFlowStatsDto> forwardRanking = aggregateForwardStats(forwardBuckets, forwards, metricType);
+        List<UserPackageFlowStatsDto.TopRuleSeriesDto> topRuleSeries = buildTopRuleSeries(
+                forwardBuckets,
+                forwardRanking,
+                granularityType,
+                trendSeries
+        );
 
         UserPackageFlowStatsDto result = new UserPackageFlowStatsDto();
+
         UserPackageFlowStatsDto.RangeDto rangeDto = new UserPackageFlowStatsDto.RangeDto();
         rangeDto.setStartTime(range.startTime);
         rangeDto.setEndTime(range.endTime);
+
+        result.setFilters(buildFilters(range, granularityType, metricType));
+        result.setOverviewCards(buildOverviewCards(adminScope, user, forwards, summary, peakPoint));
+        result.setRankings(buildRankings(adminScope, userBuckets, forwardBuckets, forwardRanking, forwards, metricType));
         result.setRange(rangeDto);
-        result.setSummary(buildSummaryFromSeries(series));
+        result.setSummary(summary);
         result.setMeta(buildMeta(
                 adminScope ? "global" : "self",
-                adminScope ? "all" : "top10",
-                allForwardStats.size(),
-                visibleForwardStats.size(),
-                series.stream().anyMatch(item -> Boolean.FALSE.equals(item.getSampled()))
+                "all",
+                forwardRanking.size(),
+                forwardRanking.size(),
+                trendResult.hasSamplingGap(),
+                granularityType,
+                metricType,
+                topRuleSeries.size(),
+                peakPoint == null ? null : peakPoint.bucketTime()
         ));
-        result.setDefaultHourTime(selectDefaultHourTime(series, range.endTime));
-        result.setSeries(series);
-        result.setForwardStats(visibleForwardStats);
+        result.setDefaultHourTime(selectDefaultHourTime(trendSeries, range.endTime));
+        result.setSeries(trendSeries);
+        result.setForwardStats(forwardRanking);
+        result.setTrendSeries(trendSeries);
+        result.setTopRuleSeries(topRuleSeries);
         return R.ok(result);
     }
 
@@ -271,7 +304,11 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
                 null,
                 rows.size(),
                 rows.size(),
-                hourTime != currentHour && !forwards.isEmpty() && rows.isEmpty()
+                hourTime != currentHour && !forwards.isEmpty() && rows.isEmpty(),
+                GranularityType.HOUR,
+                MetricType.FLOW,
+                rows.size(),
+                hourTime
         ));
         result.setRows(rows);
         return R.ok(result);
@@ -455,31 +492,23 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
     }
 
-    private List<UserPackageFlowStatsDto.SeriesPointDto> buildSeries(Long userId, NormalizedRange range, long currentHour) {
+    private List<StatisticsFlow> loadUserBucketsWithRealtime(Long userId, NormalizedRange range, long currentHour) {
         boolean includeRealtimeCurrentHour = rangeContainsHour(range, currentHour);
-        List<StatisticsFlow> flowList = loadHistoricalUserBuckets(
+        List<StatisticsFlow> flowList = new ArrayList<>(loadHistoricalUserBuckets(
                 userId,
                 range.startTime,
                 includeRealtimeCurrentHour ? currentHour - HOUR_MILLIS : range.endTime
-        );
-        FlowStatsSeriesSupport.SeriesBuildResult historicalSeries = FlowStatsSeriesSupport.buildHistoricalSeries(
-                range.startTime,
-                includeRealtimeCurrentHour ? currentHour - HOUR_MILLIS : range.endTime,
-                flowList,
-                hourTime -> formatHour(hourTime, RANGE_HOUR_FORMATTER)
-        );
-
-        List<UserPackageFlowStatsDto.SeriesPointDto> result = new ArrayList<>(historicalSeries.getSeries());
+        ));
         if (includeRealtimeCurrentHour) {
-            result.add(buildRealtimeSeriesPoint(userId, currentHour));
+            flowList.addAll(buildRealtimeCurrentHourUserBuckets(userId, currentHour));
         }
-        return result;
+        return flowList;
     }
 
-    private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildForwardStats(Long userId,
-                                                                                NormalizedRange range,
-                                                                                List<UserPackageDto.UserForwardDetailDto> forwards,
-                                                                                long currentHour) {
+    private List<ForwardStatisticsFlow> loadForwardBucketsWithRealtime(Long userId,
+                                                                       NormalizedRange range,
+                                                                       List<UserPackageDto.UserForwardDetailDto> forwards,
+                                                                       long currentHour) {
         boolean includeRealtimeCurrentHour = rangeContainsHour(range, currentHour);
         List<ForwardStatisticsFlow> flowList = new ArrayList<>(loadHistoricalForwardBuckets(
                 userId,
@@ -489,7 +518,25 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (includeRealtimeCurrentHour) {
             flowList.addAll(buildRealtimeCurrentHourForwardBuckets(userId, currentHour, forwards));
         }
-        return aggregateForwardStats(flowList, forwards);
+        return flowList;
+    }
+
+    private FlowStatsSeriesSupport.SeriesBuildResult buildTrendSeries(List<StatisticsFlow> flowList,
+                                                                      NormalizedRange range,
+                                                                      GranularityType granularityType) {
+        FlowStatsSeriesSupport.SeriesBuildResult hourlySeries = FlowStatsSeriesSupport.buildHistoricalSeries(
+                range.startTime,
+                range.endTime,
+                flowList,
+                hourTime -> formatBucketTime(hourTime, GranularityType.HOUR)
+        );
+        if (granularityType == GranularityType.HOUR) {
+            return hourlySeries;
+        }
+        return FlowStatsSeriesSupport.aggregateSeriesByDay(
+                hourlySeries.getSeries(),
+                bucketTime -> formatBucketTime(bucketTime, GranularityType.DAY)
+        );
     }
 
     private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> buildHourDetailRows(Long userId,
@@ -532,26 +579,32 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return forwardStatisticsFlowService.list(queryWrapper);
     }
 
-    private UserPackageFlowStatsDto.SeriesPointDto buildRealtimeSeriesPoint(Long userId, long hourTime) {
+    private List<StatisticsFlow> buildRealtimeCurrentHourUserBuckets(Long userId, long hourTime) {
         List<User> users = loadRealtimeUsers(userId);
         Map<Long, StatisticsFlow> latestBuckets = loadLatestUserBucketsBefore(hourTime, users);
 
-        long totalInFlow = 0L;
-        long totalOutFlow = 0L;
+        List<StatisticsFlow> realtimeBuckets = new ArrayList<>();
         for (User currentUser : users) {
             StatisticsFlow latestBucket = latestBuckets.get(currentUser.getId());
-            totalInFlow += calculateIncrement(defaultLong(currentUser.getInFlow()), latestBucket == null ? null : latestBucket.getTotalInFlow());
-            totalOutFlow += calculateIncrement(defaultLong(currentUser.getOutFlow()), latestBucket == null ? null : latestBucket.getTotalOutFlow());
-        }
+            long totalInFlow = defaultLong(currentUser.getInFlow());
+            long totalOutFlow = defaultLong(currentUser.getOutFlow());
+            long realtimeInFlow = calculateIncrement(totalInFlow, latestBucket == null ? null : latestBucket.getTotalInFlow());
+            long realtimeOutFlow = calculateIncrement(totalOutFlow, latestBucket == null ? null : latestBucket.getTotalOutFlow());
 
-        UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
-        point.setHourTime(hourTime);
-        point.setTime(formatHour(hourTime, RANGE_HOUR_FORMATTER));
-        point.setSampled(true);
-        point.setInFlow(totalInFlow);
-        point.setOutFlow(totalOutFlow);
-        point.setFlow(totalInFlow + totalOutFlow);
-        return point;
+            StatisticsFlow bucket = new StatisticsFlow();
+            bucket.setUserId(currentUser.getId());
+            bucket.setHourTime(hourTime);
+            bucket.setTime(formatBucketTime(hourTime, GranularityType.HOUR));
+            bucket.setInFlow(realtimeInFlow);
+            bucket.setOutFlow(realtimeOutFlow);
+            bucket.setFlow(realtimeInFlow + realtimeOutFlow);
+            bucket.setTotalInFlow(totalInFlow);
+            bucket.setTotalOutFlow(totalOutFlow);
+            bucket.setTotalFlow(totalInFlow + totalOutFlow);
+            bucket.setCreatedTime(hourTime);
+            realtimeBuckets.add(bucket);
+        }
+        return realtimeBuckets;
     }
 
     private List<User> loadRealtimeUsers(Long userId) {
@@ -673,6 +726,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> aggregateForwardStats(List<ForwardStatisticsFlow> flowList,
                                                                                     List<UserPackageDto.UserForwardDetailDto> forwards) {
+        return aggregateForwardStats(flowList, forwards, MetricType.FLOW);
+    }
+
+    private List<UserPackageFlowStatsDto.ForwardFlowStatsDto> aggregateForwardStats(List<ForwardStatisticsFlow> flowList,
+                                                                                    List<UserPackageDto.UserForwardDetailDto> forwards,
+                                                                                    MetricType metricType) {
         Map<Long, UserPackageDto.UserForwardDetailDto> forwardMap = new LinkedHashMap<>();
         for (UserPackageDto.UserForwardDetailDto forward : forwards) {
             forwardMap.put(forward.getId(), forward);
@@ -694,8 +753,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
 
         return aggregated.values().stream()
-                .sorted(Comparator.comparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getFlow).reversed()
-                        .thenComparing(UserPackageFlowStatsDto.ForwardFlowStatsDto::getId))
+                .sorted((left, right) -> compareMetric(metricType, left.getInFlow(), left.getOutFlow(), left.getFlow(), right.getInFlow(), right.getOutFlow(), right.getFlow(), left.getId(), right.getId()))
                 .toList();
     }
 
@@ -728,25 +786,243 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return summary;
     }
 
+    private UserPackageFlowStatsDto.FiltersDto buildFilters(NormalizedRange range,
+                                                            GranularityType granularityType,
+                                                            MetricType metricType) {
+        UserPackageFlowStatsDto.FiltersDto filters = new UserPackageFlowStatsDto.FiltersDto();
+        filters.setStartTime(range.startTime);
+        filters.setEndTime(range.endTime);
+        filters.setGranularity(granularityType.value);
+        filters.setMetric(metricType.value);
+        return filters;
+    }
+
+    private UserPackageFlowStatsDto.OverviewCardsDto buildOverviewCards(boolean adminScope,
+                                                                       User user,
+                                                                       List<UserPackageDto.UserForwardDetailDto> forwards,
+                                                                       UserPackageFlowStatsDto.SummaryDto summary,
+                                                                       PeakPoint peakPoint) {
+        UserPackageFlowStatsDto.OverviewCardsDto overviewCards = new UserPackageFlowStatsDto.OverviewCardsDto();
+        overviewCards.setTotalInFlow(summary.getTotalInFlow());
+        overviewCards.setTotalOutFlow(summary.getTotalOutFlow());
+        overviewCards.setTotalFlow(summary.getTotalFlow());
+        overviewCards.setPeakBucketTime(peakPoint == null ? null : peakPoint.bucketTime());
+        overviewCards.setPeakBucketValue(peakPoint == null ? 0L : peakPoint.value());
+
+        if (adminScope) {
+            overviewCards.setUserCount((long) this.count(new QueryWrapper<User>().gt("id", 0)));
+            overviewCards.setTunnelCount((long) tunnelService.count(new QueryWrapper<Tunnel>().gt("id", 0)));
+            overviewCards.setForwardCount((long) forwardService.count(new QueryWrapper<Forward>().gt("id", 0)));
+            return overviewCards;
+        }
+
+        overviewCards.setFlowLimit(user.getFlow());
+        overviewCards.setUsedFlow(summary.getTotalFlow());
+        overviewCards.setForwardLimit(user.getNum());
+        overviewCards.setUsedForwardCount(forwards.size());
+        return overviewCards;
+    }
+
+    private UserPackageFlowStatsDto.RankingsDto buildRankings(boolean adminScope,
+                                                              List<StatisticsFlow> userBuckets,
+                                                              List<ForwardStatisticsFlow> forwardBuckets,
+                                                              List<UserPackageFlowStatsDto.ForwardFlowStatsDto> forwardRanking,
+                                                              List<UserPackageDto.UserForwardDetailDto> forwards,
+                                                              MetricType metricType) {
+        UserPackageFlowStatsDto.RankingsDto rankings = new UserPackageFlowStatsDto.RankingsDto();
+        rankings.setRightTitle(adminScope ? "转发流量榜" : "我的转发流量榜");
+        rankings.setRight(buildForwardRankingItems(forwardRanking, metricType));
+
+        if (adminScope) {
+            rankings.setLeftTitle("用户流量排行榜");
+            rankings.setLeft(buildUserRankingItems(userBuckets, metricType));
+            return rankings;
+        }
+
+        rankings.setLeftTitle("隧道流量榜");
+        rankings.setLeft(buildTunnelRankingItems(forwardBuckets, metricType));
+        return rankings;
+    }
+
+    private List<UserPackageFlowStatsDto.RankingItemDto> buildUserRankingItems(List<StatisticsFlow> userBuckets,
+                                                                               MetricType metricType) {
+        Map<Long, String> userNames = this.list(new QueryWrapper<User>().gt("id", 0)).stream()
+                .filter(item -> item.getId() != null)
+                .collect(LinkedHashMap::new, (map, item) -> map.put(item.getId(), item.getUser()), LinkedHashMap::putAll);
+
+        Map<Long, UserPackageFlowStatsDto.RankingItemDto> rankingMap = new LinkedHashMap<>();
+        for (StatisticsFlow bucket : userBuckets) {
+            if (bucket.getUserId() == null) {
+                continue;
+            }
+            UserPackageFlowStatsDto.RankingItemDto item = rankingMap.computeIfAbsent(bucket.getUserId(), userId -> {
+                UserPackageFlowStatsDto.RankingItemDto rankingItem = new UserPackageFlowStatsDto.RankingItemDto();
+                rankingItem.setId(userId);
+                rankingItem.setName(userNames.getOrDefault(userId, "用户#" + userId));
+                rankingItem.setInFlow(0L);
+                rankingItem.setOutFlow(0L);
+                rankingItem.setFlow(0L);
+                return rankingItem;
+            });
+            item.setInFlow(item.getInFlow() + defaultLong(bucket.getInFlow()));
+            item.setOutFlow(item.getOutFlow() + defaultLong(bucket.getOutFlow()));
+            item.setFlow(item.getFlow() + defaultLong(bucket.getFlow()));
+        }
+
+        return rankingMap.values().stream()
+                .filter(item -> metricType.valueOf(item.getInFlow(), item.getOutFlow(), item.getFlow()) > 0)
+                .sorted((left, right) -> compareMetric(metricType, left.getInFlow(), left.getOutFlow(), left.getFlow(), right.getInFlow(), right.getOutFlow(), right.getFlow(), left.getId(), right.getId()))
+                .toList();
+    }
+
+    private List<UserPackageFlowStatsDto.RankingItemDto> buildTunnelRankingItems(List<ForwardStatisticsFlow> forwardBuckets,
+                                                                                 MetricType metricType) {
+        Map<Long, UserPackageFlowStatsDto.RankingItemDto> rankingMap = new LinkedHashMap<>();
+        for (ForwardStatisticsFlow bucket : forwardBuckets) {
+            if (bucket.getTunnelId() == null) {
+                continue;
+            }
+            UserPackageFlowStatsDto.RankingItemDto item = rankingMap.computeIfAbsent(bucket.getTunnelId(), tunnelId -> {
+                UserPackageFlowStatsDto.RankingItemDto rankingItem = new UserPackageFlowStatsDto.RankingItemDto();
+                rankingItem.setId(tunnelId);
+                rankingItem.setName(bucket.getTunnelName() == null ? "未命名隧道" : bucket.getTunnelName());
+                rankingItem.setInFlow(0L);
+                rankingItem.setOutFlow(0L);
+                rankingItem.setFlow(0L);
+                return rankingItem;
+            });
+            item.setInFlow(item.getInFlow() + defaultLong(bucket.getInFlow()));
+            item.setOutFlow(item.getOutFlow() + defaultLong(bucket.getOutFlow()));
+            item.setFlow(item.getFlow() + defaultLong(bucket.getFlow()));
+        }
+
+        return rankingMap.values().stream()
+                .filter(item -> metricType.valueOf(item.getInFlow(), item.getOutFlow(), item.getFlow()) > 0)
+                .sorted((left, right) -> compareMetric(metricType, left.getInFlow(), left.getOutFlow(), left.getFlow(), right.getInFlow(), right.getOutFlow(), right.getFlow(), left.getId(), right.getId()))
+                .toList();
+    }
+
+    private List<UserPackageFlowStatsDto.RankingItemDto> buildForwardRankingItems(List<UserPackageFlowStatsDto.ForwardFlowStatsDto> forwardRanking,
+                                                                                  MetricType metricType) {
+        return forwardRanking.stream()
+                .filter(item -> metricType.valueOf(item.getInFlow(), item.getOutFlow(), item.getFlow()) > 0)
+                .map(item -> {
+                    UserPackageFlowStatsDto.RankingItemDto rankingItem = new UserPackageFlowStatsDto.RankingItemDto();
+                    rankingItem.setId(item.getId());
+                    rankingItem.setName(item.getName());
+                    rankingItem.setSecondaryName(StringUtils.isNotBlank(item.getUserName()) ? item.getUserName() : item.getTunnelName());
+                    rankingItem.setInFlow(item.getInFlow());
+                    rankingItem.setOutFlow(item.getOutFlow());
+                    rankingItem.setFlow(item.getFlow());
+                    return rankingItem;
+                })
+                .toList();
+    }
+
+    private List<UserPackageFlowStatsDto.TopRuleSeriesDto> buildTopRuleSeries(List<ForwardStatisticsFlow> forwardBuckets,
+                                                                              List<UserPackageFlowStatsDto.ForwardFlowStatsDto> forwardRanking,
+                                                                              GranularityType granularityType,
+                                                                              List<UserPackageFlowStatsDto.SeriesPointDto> trendSeries) {
+        Map<Long, List<ForwardStatisticsFlow>> bucketMap = new LinkedHashMap<>();
+        for (ForwardStatisticsFlow bucket : forwardBuckets) {
+            if (bucket.getForwardId() == null) {
+                continue;
+            }
+            bucketMap.computeIfAbsent(bucket.getForwardId(), ignored -> new ArrayList<>()).add(bucket);
+        }
+
+        List<UserPackageFlowStatsDto.TopRuleSeriesDto> result = new ArrayList<>();
+        for (UserPackageFlowStatsDto.ForwardFlowStatsDto forward : forwardRanking.stream().limit(TOP_RULE_LIMIT).toList()) {
+            UserPackageFlowStatsDto.TopRuleSeriesDto seriesDto = new UserPackageFlowStatsDto.TopRuleSeriesDto();
+            seriesDto.setId(forward.getId());
+            seriesDto.setName(forward.getName());
+            seriesDto.setUserName(forward.getUserName());
+            seriesDto.setTotalInFlow(forward.getInFlow());
+            seriesDto.setTotalOutFlow(forward.getOutFlow());
+            seriesDto.setTotalFlow(forward.getFlow());
+
+            Map<Long, UserPackageFlowStatsDto.SeriesPointDto> pointMap = aggregateForwardSeriesByGranularity(
+                    bucketMap.getOrDefault(forward.getId(), new ArrayList<>()),
+                    granularityType
+            );
+            for (UserPackageFlowStatsDto.SeriesPointDto timelinePoint : trendSeries) {
+                long bucketTime = resolveSeriesTime(timelinePoint);
+                if (Boolean.FALSE.equals(timelinePoint.getSampled())) {
+                    seriesDto.getSeries().add(createGapSeriesPoint(bucketTime, timelinePoint.getTime()));
+                    continue;
+                }
+
+                UserPackageFlowStatsDto.SeriesPointDto point = pointMap.get(bucketTime);
+                if (point == null) {
+                    point = FlowStatsSeriesSupport.createSampledPoint(bucketTime, timelinePoint.getTime());
+                } else {
+                    point.setTime(timelinePoint.getTime());
+                }
+                seriesDto.getSeries().add(point);
+            }
+            result.add(seriesDto);
+        }
+        return result;
+    }
+
+    private Map<Long, UserPackageFlowStatsDto.SeriesPointDto> aggregateForwardSeriesByGranularity(List<ForwardStatisticsFlow> forwardBuckets,
+                                                                                                  GranularityType granularityType) {
+        Map<Long, UserPackageFlowStatsDto.SeriesPointDto> pointMap = new LinkedHashMap<>();
+        for (ForwardStatisticsFlow bucket : forwardBuckets) {
+            if (bucket.getHourTime() == null) {
+                continue;
+            }
+            long bucketTime = granularityType == GranularityType.DAY ? truncateToDay(bucket.getHourTime()) : bucket.getHourTime();
+            UserPackageFlowStatsDto.SeriesPointDto point = pointMap.computeIfAbsent(
+                    bucketTime,
+                    ignored -> FlowStatsSeriesSupport.createSampledPoint(bucketTime, formatBucketTime(bucketTime, granularityType))
+            );
+            point.setInFlow(point.getInFlow() + defaultLong(bucket.getInFlow()));
+            point.setOutFlow(point.getOutFlow() + defaultLong(bucket.getOutFlow()));
+            point.setFlow(point.getFlow() + defaultLong(bucket.getFlow()));
+        }
+        return pointMap;
+    }
+
+    private UserPackageFlowStatsDto.SeriesPointDto createGapSeriesPoint(long bucketTime, String time) {
+        UserPackageFlowStatsDto.SeriesPointDto point = new UserPackageFlowStatsDto.SeriesPointDto();
+        point.setBucketTime(bucketTime);
+        point.setHourTime(bucketTime);
+        point.setTime(time);
+        point.setSampled(false);
+        point.setInFlow(null);
+        point.setOutFlow(null);
+        point.setFlow(null);
+        return point;
+    }
+
     private UserPackageFlowStatsDto.MetaDto buildMeta(String scope,
                                                       String rankingMode,
                                                       int totalRuleCount,
                                                       int returnedRuleCount,
-                                                      boolean hasSamplingGap) {
+                                                      boolean hasSamplingGap,
+                                                      GranularityType granularityType,
+                                                      MetricType metricType,
+                                                      int topRuleCount,
+                                                      Long peakBucketTime) {
         UserPackageFlowStatsDto.MetaDto meta = new UserPackageFlowStatsDto.MetaDto();
         meta.setScope(scope);
         meta.setRankingMode(rankingMode);
         meta.setTotalRuleCount(totalRuleCount);
         meta.setReturnedRuleCount(returnedRuleCount);
         meta.setHasSamplingGap(hasSamplingGap);
+        meta.setGranularity(granularityType.value);
+        meta.setMetric(metricType.value);
+        meta.setTopRuleCount(topRuleCount);
+        meta.setPeakBucketTime(peakBucketTime);
         return meta;
     }
 
     private long selectDefaultHourTime(List<UserPackageFlowStatsDto.SeriesPointDto> series, long fallbackHourTime) {
         for (int index = series.size() - 1; index >= 0; index--) {
             UserPackageFlowStatsDto.SeriesPointDto point = series.get(index);
-            if (defaultLong(point.getFlow()) > 0 && point.getHourTime() != null) {
-                return point.getHourTime();
+            if (defaultLong(point.getFlow()) > 0 && resolveSeriesTime(point) > 0) {
+                return resolveSeriesTime(point);
             }
         }
         return fallbackHourTime;
@@ -802,8 +1078,117 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return increment < 0 ? currentValue : increment;
     }
 
+    private PeakPoint findPeakPoint(List<UserPackageFlowStatsDto.SeriesPointDto> series, MetricType metricType) {
+        PeakPoint peakPoint = null;
+        for (UserPackageFlowStatsDto.SeriesPointDto point : series) {
+            if (Boolean.FALSE.equals(point.getSampled())) {
+                continue;
+            }
+            long value = metricType.valueOf(point.getInFlow(), point.getOutFlow(), point.getFlow());
+            if (value <= 0) {
+                continue;
+            }
+            if (peakPoint == null || value > peakPoint.value()) {
+                peakPoint = new PeakPoint(resolveSeriesTime(point), value);
+            }
+        }
+        return peakPoint;
+    }
+
+    private int compareMetric(MetricType metricType,
+                              Long leftInFlow,
+                              Long leftOutFlow,
+                              Long leftFlow,
+                              Long rightInFlow,
+                              Long rightOutFlow,
+                              Long rightFlow,
+                              Long leftId,
+                              Long rightId) {
+        int metricCompare = Long.compare(
+                metricType.valueOf(rightInFlow, rightOutFlow, rightFlow),
+                metricType.valueOf(leftInFlow, leftOutFlow, leftFlow)
+        );
+        if (metricCompare != 0) {
+            return metricCompare;
+        }
+        return Long.compare(defaultLong(leftId), defaultLong(rightId));
+    }
+
+    private long resolveSeriesTime(UserPackageFlowStatsDto.SeriesPointDto point) {
+        if (point.getBucketTime() != null) {
+            return point.getBucketTime();
+        }
+        return defaultLong(point.getHourTime());
+    }
+
+    private String formatBucketTime(long timestamp, GranularityType granularityType) {
+        return formatHour(timestamp, granularityType == GranularityType.DAY ? RANGE_DAY_FORMATTER : RANGE_HOUR_FORMATTER);
+    }
+
+    private GranularityType parseGranularityType(String granularity) {
+        for (GranularityType value : GranularityType.values()) {
+            if (value.value.equals(granularity)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private MetricType parseMetricType(String metric) {
+        for (MetricType value : MetricType.values()) {
+            if (value.value.equals(metric)) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private long truncateToDay(long timestamp) {
+        return Instant.ofEpochMilli(timestamp)
+                .atZone(ZoneId.systemDefault())
+                .truncatedTo(ChronoUnit.DAYS)
+                .toInstant()
+                .toEpochMilli();
+    }
+
     private long defaultLong(Long value) {
         return value == null ? 0L : value;
+    }
+
+    private record PeakPoint(long bucketTime, long value) {
+    }
+
+    private enum GranularityType {
+        HOUR("hour"),
+        DAY("day");
+
+        private final String value;
+
+        GranularityType(String value) {
+            this.value = value;
+        }
+    }
+
+    private enum MetricType {
+        FLOW("flow"),
+        IN_FLOW("inFlow"),
+        OUT_FLOW("outFlow");
+
+        private final String value;
+
+        MetricType(String value) {
+            this.value = value;
+        }
+
+        private long valueOf(Long inFlow, Long outFlow, Long flow) {
+            if (this == IN_FLOW) {
+                return inFlow == null ? 0L : inFlow;
+            }
+            if (this == OUT_FLOW) {
+                return outFlow == null ? 0L : outFlow;
+            }
+            return flow == null ? 0L : flow;
+        }
     }
 
     private static final class NormalizedRange {
