@@ -18,6 +18,7 @@ import {
 import { getUserPackageFlowStats } from "@/api";
 import {
   applyPresetRange,
+  buildTopRuleTooltipRows,
   buildTopRuleChartData,
   createFlowStatsFilters,
   normalizeFlowSeries,
@@ -32,6 +33,7 @@ import {
   type FlowStatsMetric,
   type FlowStatsPreset,
   type FlowStatsSummary,
+  type TooltipRow,
   type TopRuleSeries,
 } from "./dashboard-flow-utils";
 
@@ -355,7 +357,7 @@ export default function DashboardPage() {
                         return (
                           <TooltipBox
                             title={String(label)}
-                            rows={[{ label: "状态", value: "该时段无采样数据" }]}
+                            rows={[{ key: "status", label: "状态", value: "该时段无采样数据" }]}
                           />
                         );
                       }
@@ -363,9 +365,9 @@ export default function DashboardPage() {
                         <TooltipBox
                           title={String(label)}
                           rows={[
-                            { label: "总流量", value: formatFlow(point.flow ?? 0) },
-                            { label: "入站", value: formatFlow(point.inFlow ?? 0) },
-                            { label: "出站", value: formatFlow(point.outFlow ?? 0) },
+                            { key: "flow", label: "总流量", value: formatFlow(point.flow ?? 0) },
+                            { key: "inFlow", label: "入站", value: formatFlow(point.inFlow ?? 0) },
+                            { key: "outFlow", label: "出站", value: formatFlow(point.outFlow ?? 0) },
                           ]}
                         />
                       );
@@ -414,17 +416,12 @@ export default function DashboardPage() {
                         return (
                           <TooltipBox
                             title={String(label)}
-                            rows={[{ label: "状态", value: "该时段无采样数据" }]}
+                            rows={[{ key: "status", label: "状态", value: "该时段无采样数据" }]}
                           />
                         );
                       }
 
-                      const rows = payload
-                        .filter((item) => item.value !== null && item.value !== undefined)
-                        .map((item) => ({
-                          label: String(item.name || ""),
-                          value: formatFlow(Number(item.value || 0)),
-                        }));
+                      const rows = buildTopRuleTooltipRows(payload, formatFlow);
 
                       return <TooltipBox title={String(label)} rows={rows} />;
                     }}
@@ -435,7 +432,7 @@ export default function DashboardPage() {
                       key={item.key}
                       type="monotone"
                       dataKey={item.key}
-                      name={item.userName ? `${item.name} (${item.userName})` : item.name}
+                      name={item.displayName}
                       stroke={item.color}
                       strokeWidth={2}
                       dot={false}
@@ -512,14 +509,14 @@ function TooltipBox({
   rows,
 }: {
   title: string;
-  rows: Array<{ label: string; value: string }>;
+  rows: TooltipRow[];
 }) {
   return (
     <div className="bg-white dark:bg-default-100 border border-default-200 rounded-lg shadow-lg p-3 min-w-[180px]">
       <div className="text-sm font-medium text-foreground mb-2">{title}</div>
       <div className="space-y-1">
         {rows.map((row) => (
-          <div key={`${title}-${row.label}`} className="flex items-center justify-between gap-3 text-xs text-default-600">
+          <div key={row.key} className="flex items-center justify-between gap-3 text-xs text-default-600">
             <span>{row.label}</span>
             <span>{row.value}</span>
           </div>

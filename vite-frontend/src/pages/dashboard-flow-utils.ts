@@ -82,6 +82,7 @@ export interface TopRuleSeriesMeta {
   id: number;
   name: string;
   userName?: string;
+  displayName: string;
   color: string;
   total: number;
 }
@@ -91,6 +92,18 @@ export interface TopRuleChartRow {
   label: string;
   sampled: boolean;
   [key: string]: string | number | boolean | null;
+}
+
+export interface TooltipRow {
+  key: string;
+  label: string;
+  value: string;
+}
+
+export interface TopRuleTooltipPayloadEntry {
+  dataKey?: unknown;
+  name?: string | number;
+  value?: unknown;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -272,13 +285,22 @@ export function buildTopRuleChartData(
   topRuleSeries: TopRuleSeries[],
   metric: FlowStatsMetric,
 ): { chartData: TopRuleChartRow[]; seriesMeta: TopRuleSeriesMeta[] } {
-  const seriesMeta = topRuleSeries.map((item, index) => ({
+  const baseSeriesMeta = topRuleSeries.map((item, index) => ({
     key: `rule_${item.id}`,
     id: item.id,
     name: item.name,
     userName: item.userName,
+    displayName: item.userName ? `${item.name} (${item.userName})` : item.name,
     color: TOP_RULE_COLORS[index % TOP_RULE_COLORS.length],
     total: metric === "inFlow" ? item.totalInFlow : metric === "outFlow" ? item.totalOutFlow : item.totalFlow,
+  }));
+  const displayNameCounts = baseSeriesMeta.reduce<Map<string, number>>((counts, item) => {
+    counts.set(item.displayName, (counts.get(item.displayName) ?? 0) + 1);
+    return counts;
+  }, new Map());
+  const seriesMeta = baseSeriesMeta.map((item) => ({
+    ...item,
+    displayName: (displayNameCounts.get(item.displayName) ?? 0) > 1 ? `${item.displayName} #${item.id}` : item.displayName,
   }));
 
   const rowMap = new Map<number, TopRuleChartRow>();
@@ -324,6 +346,22 @@ export function buildTopRuleChartData(
     });
 
   return { chartData, seriesMeta };
+}
+
+export function buildTopRuleTooltipRows(
+  payload: readonly TopRuleTooltipPayloadEntry[],
+  formatFlow: (value: number) => string,
+): TooltipRow[] {
+  return payload
+    .filter((item) => item.value !== null && item.value !== undefined)
+    .map((item, index) => {
+      const rawValue = Array.isArray(item.value) ? item.value[0] : item.value;
+      return {
+        key: item.dataKey !== undefined ? String(item.dataKey) : `series_${index}`,
+        label: String(item.name ?? ""),
+        value: formatFlow(Number(rawValue ?? 0)),
+      };
+    });
 }
 
 export function toDatetimeLocalValue(date: Date): string {

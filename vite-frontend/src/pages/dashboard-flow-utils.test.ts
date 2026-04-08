@@ -4,6 +4,7 @@ import {
   applyPresetRange,
   buildHourDetailCacheKey,
   buildTopRuleChartData,
+  buildTopRuleTooltipRows,
   createDefaultFlowStatsRange,
   createFlowStatsFilters,
   getHourDetailHeading,
@@ -204,9 +205,87 @@ describe("dashboard-flow-utils", () => {
     );
 
     expect(seriesMeta.map((item) => item.key)).toEqual(["rule_1", "rule_2"]);
+    expect(seriesMeta.map((item) => item.displayName)).toEqual(["rule-a", "rule-b"]);
     expect(chartData).toEqual([
       { bucketTime: 1000, label: "04-07 10:00", sampled: true, rule_1: 10, rule_2: 3 },
       { bucketTime: 2000, label: "04-07 11:00", sampled: false, rule_1: null, rule_2: null },
+    ]);
+  });
+
+  it("adds stable id suffixes when top-rule series names collide", () => {
+    const { seriesMeta } = buildTopRuleChartData(
+      [
+        {
+          id: 11,
+          name: "新加坡",
+          userName: "ddm_jaxyu",
+          totalFlow: 18,
+          totalInFlow: 12,
+          totalOutFlow: 6,
+          series: [{ bucketTime: 1000, time: "04-07 10:00", flow: 10, inFlow: 7, outFlow: 3, sampled: true }],
+        },
+        {
+          id: 12,
+          name: "新加坡",
+          userName: "ddm_jaxyu",
+          totalFlow: 9,
+          totalInFlow: 4,
+          totalOutFlow: 5,
+          series: [{ bucketTime: 1000, time: "04-07 10:00", flow: 3, inFlow: 1, outFlow: 2, sampled: true }],
+        },
+      ],
+      "flow",
+    );
+
+    expect(seriesMeta.map((item) => item.displayName)).toEqual([
+      "新加坡 (ddm_jaxyu) #11",
+      "新加坡 (ddm_jaxyu) #12",
+    ]);
+  });
+
+  it("does not add suffixes when same rule name is already disambiguated by user name", () => {
+    const { seriesMeta } = buildTopRuleChartData(
+      [
+        {
+          id: 21,
+          name: "新加坡",
+          userName: "alice",
+          totalFlow: 18,
+          totalInFlow: 12,
+          totalOutFlow: 6,
+          series: [{ bucketTime: 1000, time: "04-07 10:00", flow: 10, inFlow: 7, outFlow: 3, sampled: true }],
+        },
+        {
+          id: 22,
+          name: "新加坡",
+          userName: "bob",
+          totalFlow: 9,
+          totalInFlow: 4,
+          totalOutFlow: 5,
+          series: [{ bucketTime: 1000, time: "04-07 10:00", flow: 3, inFlow: 1, outFlow: 2, sampled: true }],
+        },
+      ],
+      "flow",
+    );
+
+    expect(seriesMeta.map((item) => item.displayName)).toEqual([
+      "新加坡 (alice)",
+      "新加坡 (bob)",
+    ]);
+  });
+
+  it("builds top-rule tooltip rows with dataKey-backed keys for duplicate labels", () => {
+    expect(
+      buildTopRuleTooltipRows(
+        [
+          { dataKey: "rule_11", name: "新加坡 (ddm_jaxyu) #11", value: 0 },
+          { dataKey: "rule_12", name: "新加坡 (ddm_jaxyu) #12", value: 93.57 * 1024 * 1024 * 1024 },
+        ],
+        (value) => `${value} B`,
+      ),
+    ).toEqual([
+      { key: "rule_11", label: "新加坡 (ddm_jaxyu) #11", value: "0 B" },
+      { key: "rule_12", label: "新加坡 (ddm_jaxyu) #12", value: `${93.57 * 1024 * 1024 * 1024} B` },
     ]);
   });
 });
