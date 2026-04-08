@@ -214,59 +214,80 @@ jobs:
             ./springboot-backend
 
   create-release:
-    name: Create Release and Tag
+    name: Create Or Update Release
     needs: [check-version, build-gost, build-vite, build-java]
-    if: needs.check-version.outputs.should_build == 'true' && needs.check-version.outputs.tag_exists != 'true'
+    if: >
+      always() &&
+      needs.check-version.outputs.should_build == 'true' &&
+      needs.build-vite.result == 'success' &&
+      needs.build-java.result == 'success' &&
+      (needs.build-gost.result == 'success' || needs.build-gost.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
 
       - name: Download GOST AMD64 binary
+        if: needs.check-version.outputs.should_build_gost == 'true'
         uses: actions/download-artifact@v4
         with:
           name: gost-binary-amd64
           path: ./artifacts/amd64
 
       - name: Download GOST ARM64 binary
+        if: needs.check-version.outputs.should_build_gost == 'true'
         uses: actions/download-artifact@v4
         with:
           name: gost-binary-arm64
           path: ./artifacts/arm64
 
       - name: Rename binaries
+        if: needs.check-version.outputs.should_build_gost == 'true'
         run: |
           mv ./artifacts/amd64/gost-amd64 ./artifacts/gost-amd64
           mv ./artifacts/arm64/gost-arm64 ./artifacts/gost-arm64
 
-      - name: Create Release
+      - name: Create or Update Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${{ needs.check-version.outputs.version }}"
+          TAG_EXISTS="${{ needs.check-version.outputs.tag_exists }}"
           
-          # 创建并推送 tag
-          git tag "${VERSION}" ${{ github.sha }}
-          git push origin "${VERSION}"
+          if [[ "$TAG_EXISTS" != "true" ]]; then
+            git tag "${VERSION}" ${{ github.sha }}
+            git push origin "${VERSION}"
+            RELEASE_SHA="${{ github.sha }}"
+          else
+            RELEASE_SHA="$(git rev-list -n 1 "${VERSION}")"
+          fi
           
-          # 获取 commit 信息
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
-          COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an")
-          COMMIT_DATE=$(git log -1 --pretty=format:"%ai")
+          COMMIT_MSG=$(git log -1 --pretty=format:"%s" "$RELEASE_SHA")
+          COMMIT_AUTHOR=$(git log -1 --pretty=format:"%an" "$RELEASE_SHA")
+          COMMIT_DATE=$(git log -1 --pretty=format:"%ai" "$RELEASE_SHA")
           
-          # 创建 release
-          gh release create "${VERSION}" \
-            --title "Release ${VERSION}" \
-            --notes "## 📝 Commit Information
+          RELEASE_NOTES="## 📝 Commit Information
           - **Message**: ${COMMIT_MSG}
           - **Author**: ${COMMIT_AUTHOR}
           - **Date**: ${COMMIT_DATE}
-          - **Commit**: [\`${GITHUB_SHA:0:7}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})" \
-            --repo ${{ github.repository }}
+          - **Commit**: [\`${RELEASE_SHA:0:7}\`](https://github.com/${{ github.repository }}/commit/${RELEASE_SHA})"
+
+          if gh release view "${VERSION}" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            gh release edit "${VERSION}" \
+              --title "Release ${VERSION}" \
+              --notes "$RELEASE_NOTES" \
+              --repo ${{ github.repository }}
+          else
+            gh release create "${VERSION}" \
+              --title "Release ${VERSION}" \
+              --notes "$RELEASE_NOTES" \
+              --repo ${{ github.repository }}
+          fi
           
-          # 上传所有文件到 release
-          echo "📤 上传 GOST 二进制文件..."
-          gh release upload "${VERSION}" ./artifacts/gost-amd64 --clobber
-          gh release upload "${VERSION}" ./artifacts/gost-arm64 --clobber
+          if [[ -f ./artifacts/gost-amd64 ]]; then
+            echo "📤 上传 GOST 二进制文件..."
+            gh release upload "${VERSION}" ./artifacts/gost-amd64 --clobber
+            gh release upload "${VERSION}" ./artifacts/gost-arm64 --clobber
+          fi
           
           echo "📤 上传安装脚本..."
           gh release upload "${VERSION}" ./install.sh --clobber
