@@ -196,6 +196,7 @@ vendor/
 
 # Docker 本地配置
 .dockerignore.local
+.worktrees/
 
 # ==========================================
 # 数据库和配置文件
@@ -258,3 +259,6 @@ doraemon.jks
 device.id
 commit.sh
 sql/
+
+docs
+.worktrees
