@@ -45,6 +45,13 @@ public interface TunnelService extends IService<Tunnel> {
     R deleteTunnel(Long id);
 
     /**
+     * 删除某个节点直接关联以及间接依赖的全部隧道
+     * @param nodeId 节点ID
+     * @return 结果
+     */
+    R deleteTunnelsForNode(Long nodeId);
+
+    /**
      * 获取用户可用的隧道列表
      * @return 结果
      */

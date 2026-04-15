@@ -1086,7 +1086,9 @@ export default function NodePage() {
                 </ModalHeader>
                 <ModalBody>
                   <p>确定要删除节点 <strong>"{nodeToDelete?.name}"</strong> 吗？</p>
-                  <p className="text-small text-default-500">此操作不可恢复，请谨慎操作。</p>
+                  <p className="text-small text-default-500">
+                    删除节点时，会同时删除直接关联该节点以及依赖这些关联隧道的隧道配置，此操作不可恢复，请谨慎操作。
+                  </p>
                 </ModalBody>
                 <ModalFooter>
                   <Button variant="light" onPress={onClose}>

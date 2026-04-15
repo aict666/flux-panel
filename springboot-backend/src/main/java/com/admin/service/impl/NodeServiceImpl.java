@@ -16,6 +16,9 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.NoTransactionException;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 import javax.annotation.Resource;
 import java.util.List;
@@ -35,9 +38,6 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
 
     @Resource
     ViteConfigService viteConfigService;
-
-    @Resource
-    ChainTunnelService chainTunnelService;
 
 
     @Override
@@ -101,15 +101,17 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public R deleteNode(Long id) {
         Node node = this.getById(id);
         if (node == null) {
             return R.err("节点不存在");
         }
 
-        List<ChainTunnel> list = chainTunnelService.list(new QueryWrapper<ChainTunnel>().eq("node_id", id).groupBy("tunnel_id"));
-        for (ChainTunnel tunnel : list) {
-            tunnelService.deleteTunnel(tunnel.getTunnelId());
+        R deleteTunnelsResult = tunnelService.deleteTunnelsForNode(id);
+        if (deleteTunnelsResult.getCode() != 0) {
+            markTransactionForRollback();
+            return deleteTunnelsResult;
         }
         this.removeById(id);
         return R.ok();
@@ -193,6 +195,14 @@ public class NodeServiceImpl extends ServiceImpl<NodeMapper, Node> implements No
             throw new RuntimeException("安装服务名不合法");
         }
         return normalized;
+    }
+
+    private void markTransactionForRollback() {
+        try {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+        } catch (NoTransactionException ignored) {
+            // Plain unit tests can call service methods directly without a Spring transaction proxy.
+        }
     }
 
 

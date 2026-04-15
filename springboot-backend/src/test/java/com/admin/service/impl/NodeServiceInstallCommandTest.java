@@ -6,6 +6,7 @@ import com.admin.common.dto.NodeUpdateDto;
 import com.admin.common.lang.R;
 import com.admin.entity.Node;
 import com.admin.entity.ViteConfig;
+import com.admin.service.TunnelService;
 import com.admin.service.ViteConfigService;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -13,6 +14,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class NodeServiceInstallCommandTest {
@@ -86,6 +88,22 @@ class NodeServiceInstallCommandTest {
         assertEquals("flux_agent", service.updatedNode.getInstallServiceName());
     }
 
+    @Test
+    void shouldNotRemoveNodeWhenDeletingRelatedTunnelFails() {
+        TestableNodeServiceImpl service = new TestableNodeServiceImpl();
+        service.node = buildNode(5L, "secret-e", "agent_e");
+
+        TunnelService tunnelService = Mockito.mock(TunnelService.class);
+        Mockito.when(tunnelService.deleteTunnelsForNode(5L)).thenReturn(R.err("该隧道仍被其他隧道引用，无法删除"));
+        ReflectionTestUtils.setField(service, "tunnelService", tunnelService);
+
+        R result = service.deleteNode(5L);
+
+        assertEquals(-1, result.getCode());
+        assertEquals("该隧道仍被其他隧道引用，无法删除", result.getMsg());
+        assertNull(service.removedNodeId);
+    }
+
     private static ViteConfigService mockIpConfigService(String addr) {
         ViteConfigService viteConfigService = Mockito.mock(ViteConfigService.class);
         ViteConfig viteConfig = new ViteConfig();
@@ -107,6 +125,7 @@ class NodeServiceInstallCommandTest {
         private Node node;
         private Node savedNode;
         private Node updatedNode;
+        private Long removedNodeId;
 
         private TestableNodeServiceImpl() {
             ReflectionTestUtils.setField(this, "viteConfigService", Mockito.mock(ViteConfigService.class));
@@ -127,6 +146,12 @@ class NodeServiceInstallCommandTest {
         @Override
         public boolean updateById(Node entity) {
             this.updatedNode = entity;
+            return true;
+        }
+
+        @Override
+        public boolean removeById(java.io.Serializable id) {
+            this.removedNodeId = (Long) id;
             return true;
         }
     }

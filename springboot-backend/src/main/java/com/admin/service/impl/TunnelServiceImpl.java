@@ -36,6 +36,7 @@ import lombok.Data;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.NoTransactionException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
@@ -106,7 +107,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
             rebuildAffectedTunnels(tunnel.getId());
             return R.ok();
         } catch (Exception e) {
-            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            markTransactionForRollback();
             return R.err(e.getMessage());
         }
     }
@@ -168,7 +169,7 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
             rebuildAffectedTunnels(existingTunnel.getId());
             return R.ok();
         } catch (Exception e) {
-            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            markTransactionForRollback();
             return R.err(e.getMessage());
         }
     }
@@ -212,7 +213,60 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
             this.removeById(id);
             return R.ok();
         } catch (Exception e) {
-            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+            markTransactionForRollback();
+            return R.err(e.getMessage());
+        }
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public R deleteTunnelsForNode(Long nodeId) {
+        try {
+            Set<Long> rootTunnelIds = chainTunnelService.listObjs(
+                            new QueryWrapper<ChainTunnel>()
+                                    .select("DISTINCT tunnel_id")
+                                    .eq("node_id", nodeId))
+                    .stream()
+                    .filter(Objects::nonNull)
+                    .map(this::toLong)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (rootTunnelIds.isEmpty()) {
+                return R.ok();
+            }
+
+            List<Tunnel> allTunnels = this.list();
+            if (allTunnels.isEmpty()) {
+                return R.ok();
+            }
+
+            Map<Long, List<ChainTunnel>> compiledTopologyMap = getCompiledTopologyMap(
+                    chainTunnelService.list(new QueryWrapper<ChainTunnel>().in("tunnel_id",
+                            allTunnels.stream().map(Tunnel::getId).collect(Collectors.toList())))
+            );
+            Map<Long, TunnelTopologyConfigDto> topologyMap = buildTopologyMap(allTunnels, compiledTopologyMap);
+
+            Set<Long> impactedTunnelIds = new LinkedHashSet<>();
+            for (Long rootTunnelId : rootTunnelIds) {
+                impactedTunnelIds.addAll(topologySupport.collectImpactedTunnelIds(rootTunnelId, topologyMap));
+            }
+            if (impactedTunnelIds.isEmpty()) {
+                return R.ok();
+            }
+
+            List<Long> deleteOrder = new ArrayList<>(topologySupport.sortImpactedTunnelIds(impactedTunnelIds, topologyMap));
+            Collections.reverse(deleteOrder);
+
+            for (Long tunnelId : deleteOrder) {
+                R deleteResult = this.deleteTunnel(tunnelId);
+                if (deleteResult.getCode() != 0) {
+                    markTransactionForRollback();
+                    return deleteResult;
+                }
+            }
+
+            return R.ok();
+        } catch (Exception e) {
+            markTransactionForRollback();
             return R.err(e.getMessage());
         }
     }
@@ -711,6 +765,21 @@ public class TunnelServiceImpl extends ServiceImpl<TunnelMapper, Tunnel> impleme
         jsonObject.put("nodeId", nodeId);
         jsonObject.put("name", name);
         return jsonObject;
+    }
+
+    private Long toLong(Object value) {
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        return Long.valueOf(value.toString());
+    }
+
+    private void markTransactionForRollback() {
+        try {
+            TransactionAspectSupport.currentTransactionStatus().setRollbackOnly();
+        } catch (NoTransactionException ignored) {
+            // Some unit tests invoke service methods directly without a Spring transaction proxy.
+        }
     }
 
     private void ensureGostOk(GostDto gostDto) {
