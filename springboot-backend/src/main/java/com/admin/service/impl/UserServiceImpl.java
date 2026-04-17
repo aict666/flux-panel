@@ -4,6 +4,9 @@ import cloud.tianai.captcha.application.ImageCaptchaApplication;
 import cloud.tianai.captcha.spring.plugins.secondary.SecondaryVerificationApplication;
 import cn.hutool.core.map.MapUtil;
 import cn.hutool.core.util.StrUtil;
+import com.admin.common.context.ActorContext;
+import com.admin.common.context.ActorContextHolder;
+import com.admin.common.context.ActorType;
 import com.admin.common.dto.*;
 import com.admin.common.lang.R;
 import com.admin.common.utils.GostUtil;
@@ -170,7 +173,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public R getUserPackageInfo() {
-        Integer userId = JwtUtil.getUserIdFromToken();
+        Integer userId = getCurrentUserId();
         boolean adminScope = isAdminScope();
         User user = this.getById(userId);
         if (user == null) return R.err("用户不存在");
@@ -195,7 +198,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public R getUserPackageFlowStats(FlowStatsQueryDto flowStatsQueryDto) {
-        Integer userId = JwtUtil.getUserIdFromToken();
+        Integer userId = getCurrentUserId();
         boolean adminScope = isAdminScope();
         User user = this.getById(userId);
         if (user == null) {
@@ -270,7 +273,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public R getUserPackageFlowHourDetail(FlowStatsHourDetailQueryDto flowStatsHourDetailQueryDto) {
-        Integer userId = JwtUtil.getUserIdFromToken();
+        Integer userId = getCurrentUserId();
         boolean adminScope = isAdminScope();
         User user = this.getById(userId);
         if (user == null) {
@@ -316,7 +319,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public R updatePassword(ChangePasswordDto changePasswordDto) {
-        Integer userId = JwtUtil.getUserIdFromToken();
+        Integer userId = getCurrentUserId();
         User user = this.getById(userId);
         if (user == null) return R.err("用户不存在");
         if (!changePasswordDto.getNewPassword().equals(changePasswordDto.getConfirmPassword())) {
@@ -1035,7 +1038,19 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     private boolean isAdminScope() {
+        ActorContext actorContext = ActorContextHolder.get();
+        if (actorContext != null) {
+            return actorContext.getActorType() == ActorType.USER && Objects.equals(actorContext.getRoleId(), 0);
+        }
         return Objects.equals(JwtUtil.getRoleIdFromToken(), 0);
+    }
+
+    private Integer getCurrentUserId() {
+        ActorContext actorContext = ActorContextHolder.get();
+        if (actorContext != null && actorContext.getActorType() == ActorType.USER) {
+            return actorContext.getUserId();
+        }
+        return JwtUtil.getUserIdFromToken();
     }
 
     private boolean rangeContainsHour(NormalizedRange range, long hourTime) {

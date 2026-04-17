@@ -82,3 +82,35 @@ export interface Pagination {
   size: number;
   total: number;
 }
+
+export interface AgentClientRecord {
+  id: number;
+  name: string;
+  agentType: "openclaw" | "hermes-agent";
+  description?: string;
+  status: number;
+  scopes: string[];
+  createdTime: number;
+  updatedTime: number;
+  keyId?: number;
+  keyPrefix?: string;
+  keyStatus?: number;
+  expiresTime?: number | null;
+  lastUsedTime?: number | null;
+  lastUsedIp?: string | null;
+}
+
+export interface AgentAuditLogRecord {
+  id: number;
+  clientId?: number;
+  clientName?: string;
+  requestPath: string;
+  httpMethod: string;
+  action: string;
+  statusCode: number;
+  success: boolean;
+  durationMs: number;
+  requestIp?: string;
+  errorMessage?: string;
+  createdTime: number;
+}

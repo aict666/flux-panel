@@ -144,6 +144,10 @@ public class JwtUtil {
 
     public static String getNameFromToken() {
         String token = HttpContextUtils.getHttpServletRequest().getHeader("Authorization");
+        return getNameFromToken(token);
+    }
+
+    public static String getNameFromToken(String token) {
         String[] parts = token.split("\\.");
         String encodedPayload = parts[1];
         String decodedPayload = new String(Base64.getUrlDecoder().decode(encodedPayload), StandardCharsets.UTF_8);
@@ -191,4 +195,4 @@ public class JwtUtil {
         byte[] signatureBytes = hmac.doFinal(content.getBytes(StandardCharsets.UTF_8));
         return Base64.getUrlEncoder().withoutPadding().encodeToString(signatureBytes);
     }
-} 
+}

@@ -145,6 +145,47 @@ CREATE TABLE IF NOT EXISTS vite_config (
   time BIGINT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS agent_client (
+  id BIGSERIAL PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  agent_type VARCHAR(50) NOT NULL,
+  description VARCHAR(500),
+  scope_json TEXT NOT NULL,
+  created_time BIGINT NOT NULL,
+  updated_time BIGINT NOT NULL,
+  status INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS agent_api_key (
+  id BIGSERIAL PRIMARY KEY,
+  client_id BIGINT NOT NULL,
+  key_prefix VARCHAR(50) NOT NULL,
+  key_hash VARCHAR(128) NOT NULL,
+  expires_time BIGINT,
+  last_used_time BIGINT,
+  last_used_ip VARCHAR(100),
+  created_time BIGINT NOT NULL,
+  updated_time BIGINT NOT NULL,
+  status INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS agent_api_audit_log (
+  id BIGSERIAL PRIMARY KEY,
+  client_id BIGINT,
+  client_name VARCHAR(100),
+  request_path VARCHAR(255) NOT NULL,
+  http_method VARCHAR(20) NOT NULL,
+  action VARCHAR(100) NOT NULL,
+  status_code INTEGER NOT NULL,
+  success BOOLEAN NOT NULL DEFAULT FALSE,
+  duration_ms BIGINT NOT NULL DEFAULT 0,
+  request_ip VARCHAR(100),
+  error_message VARCHAR(1000),
+  created_time BIGINT NOT NULL,
+  updated_time BIGINT NOT NULL,
+  status INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE INDEX IF NOT EXISTS idx_forward_user_id ON forward(user_id);
 CREATE INDEX IF NOT EXISTS idx_forward_tunnel_id ON forward(tunnel_id);
 CREATE INDEX IF NOT EXISTS idx_forward_port_forward_id ON forward_port(forward_id);
@@ -154,3 +195,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_statistics_flow_user_hour ON statistics_flo
 CREATE INDEX IF NOT EXISTS idx_forward_statistics_flow_user_hour ON forward_statistics_flow(user_id, hour_time);
 CREATE INDEX IF NOT EXISTS idx_forward_statistics_flow_forward_hour ON forward_statistics_flow(forward_id, hour_time);
 CREATE UNIQUE INDEX IF NOT EXISTS uk_forward_statistics_flow_forward_hour ON forward_statistics_flow(forward_id, hour_time);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_agent_client_name ON agent_client(name);
+CREATE INDEX IF NOT EXISTS idx_agent_api_key_client_id ON agent_api_key(client_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_agent_api_key_prefix ON agent_api_key(key_prefix);
+CREATE INDEX IF NOT EXISTS idx_agent_api_audit_log_client_created ON agent_api_audit_log(client_id, created_time);
