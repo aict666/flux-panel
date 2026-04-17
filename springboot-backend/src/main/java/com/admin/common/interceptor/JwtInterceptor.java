@@ -1,6 +1,9 @@
 package com.admin.common.interceptor;
 
 
+import com.admin.common.context.ActorContext;
+import com.admin.common.context.ActorContextHolder;
+import com.admin.common.context.ActorType;
 import com.admin.common.exception.UnauthorizedException;
 import com.admin.common.utils.JwtUtil;
 import org.springframework.util.StringUtils;
@@ -28,7 +31,21 @@ public class JwtInterceptor implements HandlerInterceptor {
             throw new UnauthorizedException("无效的token或token已过期");
         }
 
+        ActorContextHolder.set(new ActorContext(
+                ActorType.USER,
+                JwtUtil.getUserIdFromToken(token).intValue(),
+                JwtUtil.getNameFromToken(token),
+                JwtUtil.getRoleIdFromToken(token),
+                null,
+                null,
+                null
+        ));
         
         return true;
     }
-} 
+
+    @Override
+    public void afterCompletion(HttpServletRequest request, HttpServletResponse response, Object handler, Exception ex) {
+        ActorContextHolder.clear();
+    }
+}

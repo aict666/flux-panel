@@ -103,3 +103,39 @@ export const updateConfig = (name: string, value: string) => Network.post("/conf
 export const checkCaptcha = () => Network.post("/captcha/check");
 export const generateCaptcha = () => Network.post(`/captcha/generate`);
 export const verifyCaptcha = (data: { captchaId: string; trackData: string }) => Network.post("/captcha/verify", data);
+
+// Agent API 管理
+export const createAgentClient = (data: {
+  name: string;
+  agentType: "openclaw" | "hermes-agent";
+  description?: string;
+  scopes: string[];
+  expiresTime: number;
+}) => Network.post("/agent-admin/clients/create", data);
+
+export const listAgentClients = () => Network.post("/agent-admin/clients/list");
+
+export const updateAgentClient = (data: {
+  id: number;
+  name: string;
+  description?: string;
+  status: number;
+  scopes: string[];
+}) => Network.post("/agent-admin/clients/update", data);
+
+export const deleteAgentClient = (id: number) => Network.post("/agent-admin/clients/delete", { id });
+
+export const rotateAgentClientKey = (id: number, data: { expiresTime: number }) =>
+  Network.post(`/agent-admin/clients/${id}/rotate-key`, data);
+
+export const revokeAgentKey = (id: number) => Network.post(`/agent-admin/keys/${id}/revoke`);
+
+export const listAgentAudits = (data: {
+  clientId?: number;
+  success?: boolean;
+  startTime?: number;
+  endTime?: number;
+} = {}) => Network.post("/agent-admin/audits/list", data);
+
+export const getAgentDescriptor = (clientId: number, format: "openclaw" | "hermes-agent") =>
+  Network.get(`/agent-admin/descriptor/${clientId}`, { format });

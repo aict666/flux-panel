@@ -1,5 +1,9 @@
 package com.admin.service.impl;
 
+import com.admin.common.context.ActorContext;
+import com.admin.common.context.ActorContextHolder;
+import com.admin.common.context.ActorType;
+import com.admin.common.context.CurrentActor;
 import com.admin.common.dto.*;
 import com.admin.common.lang.R;
 import com.admin.common.utils.GostUtil;
@@ -59,7 +63,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
     @Override
     public R getAllForwards() {
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
         List<ForwardWithTunnelDto> forwardList;
         if (currentUser.getRoleId() != 0) {
             forwardList = baseMapper.selectForwardsWithTunnelByUserId(currentUser.getUserId());
@@ -145,8 +149,20 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
     @Override
     public R createForward(ForwardDto forwardDto) {
-        UserInfo currentUser = getCurrentUserInfo();
+        return createForwardInternal(forwardDto, getCurrentActor());
+    }
 
+    @Override
+    public R createForwardForUser(Long userId, ForwardDto forwardDto) {
+        User user = userService.getById(userId);
+        if (user == null) {
+            return R.err("用户不存在");
+        }
+        CurrentActor currentActor = new CurrentActor(ActorType.USER, user.getId().intValue(), user.getUser(), 1, null, null);
+        return createForwardInternal(forwardDto, currentActor);
+    }
+
+    private R createForwardInternal(ForwardDto forwardDto, CurrentActor currentUser) {
         Tunnel tunnel = validateTunnel(forwardDto.getTunnelId());
         if (tunnel == null) {
             return R.err("隧道不存在");
@@ -206,7 +222,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     @Override
     public R updateForward(ForwardUpdateDto forwardUpdateDto) {
         // 1. 获取当前用户信息
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
 
 
         // 2. 检查转发是否存在
@@ -342,7 +358,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     public R deleteForward(Long id) {
 
         // 1. 获取当前用户信息
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
 
 
         // 2. 检查转发是否存在
@@ -404,7 +420,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
     @Override
     public R forceDeleteForward(Long id) {
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
         Forward forward = validateForwardExists(id, currentUser);
         if (forward == null) {
             return R.err("端口转发不存在");
@@ -417,7 +433,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     @Override
     public R diagnoseForward(Long id) {
         // 1. 获取当前用户信息
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
 
         // 2. 检查转发是否存在且用户有权限访问
         Forward forward = validateForwardExists(id, currentUser);
@@ -599,7 +615,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
     @Transactional
     public R updateForwardOrder(Map<String, Object> params) {
         // 1. 获取当前用户信息
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
 
         // 2. 验证参数
         if (!params.containsKey("forwards")) {
@@ -651,7 +667,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
 
     private R changeForwardStatus(Long id, int targetStatus, String gostMethod) {
-        UserInfo currentUser = getCurrentUserInfo();
+        CurrentActor currentUser = getCurrentActor();
         if (currentUser.getRoleId() != 0) {
             User user = userService.getById(currentUser.getUserId());
             if (user == null) return R.err("用户不存在");
@@ -869,18 +885,40 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         }
     }
 
-    private UserInfo getCurrentUserInfo() {
+    private CurrentActor getCurrentActor() {
+        ActorContext actorContext = ActorContextHolder.get();
+        if (actorContext != null) {
+            if (actorContext.getActorType() == ActorType.AGENT) {
+                return new CurrentActor(
+                        ActorType.AGENT,
+                        actorContext.getUserId(),
+                        actorContext.getUserName(),
+                        0,
+                        actorContext.getClientId(),
+                        actorContext.getClientName()
+                );
+            }
+            return new CurrentActor(
+                    ActorType.USER,
+                    actorContext.getUserId(),
+                    actorContext.getUserName(),
+                    actorContext.getRoleId(),
+                    null,
+                    null
+            );
+        }
+
         Integer userId = JwtUtil.getUserIdFromToken();
         Integer roleId = JwtUtil.getRoleIdFromToken();
         String userName = JwtUtil.getNameFromToken();
-        return new UserInfo(userId, roleId, userName);
+        return new CurrentActor(ActorType.USER, userId, userName, roleId, null, null);
     }
 
     private Tunnel validateTunnel(Integer tunnelId) {
         return tunnelService.getById(tunnelId);
     }
 
-    private Forward validateForwardExists(Long forwardId, UserInfo currentUser) {
+    private Forward validateForwardExists(Long forwardId, CurrentActor currentUser) {
         Forward forward = this.getById(forwardId);
         if (forward == null) {
             return null;
@@ -895,7 +933,7 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         return forward;
     }
 
-    private UserPermissionResult checkUserPermissions(UserInfo currentUser, Tunnel tunnel, Long excludeForwardId) {
+    private UserPermissionResult checkUserPermissions(CurrentActor currentUser, Tunnel tunnel, Long excludeForwardId) {
         if (currentUser.getRoleId() == 0) {
             return UserPermissionResult.success(null, null);
         }
@@ -1153,24 +1191,6 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
                 .toList();
         return ids.isEmpty() ? List.of(node.getId()) : ids;
     }
-
-
-
-    // ========== 内部数据类 ==========
-
-    @Data
-    private static class UserInfo {
-        private final Integer userId;
-        private final Integer roleId;
-        private final String userName;
-
-        public UserInfo(Integer userId, Integer roleId, String userName) {
-            this.userId = userId;
-            this.roleId = roleId;
-            this.userName = userName;
-        }
-    }
-
     @Data
     private static class UserPermissionResult {
         private final boolean hasError;

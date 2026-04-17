@@ -26,6 +26,8 @@ public interface ForwardService extends IService<Forward> {
      */
     R createForward(ForwardDto forwardDto);
 
+    R createForwardForUser(Long userId, ForwardDto forwardDto);
+
     /**
      * 获取端口转发列表
      * @return 结果

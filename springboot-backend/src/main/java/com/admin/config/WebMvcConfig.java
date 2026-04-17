@@ -1,6 +1,10 @@
 package com.admin.config;
 
+import com.admin.common.interceptor.AgentApiInterceptor;
 import com.admin.common.interceptor.JwtInterceptor;
+import com.admin.service.AgentApiAuditLogService;
+import com.admin.service.AgentApiKeyService;
+import com.admin.service.AgentClientService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
@@ -11,10 +15,15 @@ import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
+import javax.annotation.Resource;
+
 
 @Configuration
 @EnableWebMvc
 public class WebMvcConfig implements WebMvcConfigurer {
+
+    @Resource
+    private AgentApiInterceptor agentApiInterceptor;
 
     private CorsConfiguration buildConfig() {
         CorsConfiguration corsConfiguration = new CorsConfiguration();
@@ -48,6 +57,15 @@ public class WebMvcConfig implements WebMvcConfigurer {
         return new JwtInterceptor();
     }
 
+    @Bean
+    public AgentApiInterceptor agentApiInterceptor(
+            AgentApiKeyService agentApiKeyService,
+            AgentClientService agentClientService,
+            AgentApiAuditLogService agentApiAuditLogService
+    ) {
+        return new AgentApiInterceptor(agentApiKeyService, agentClientService, agentApiAuditLogService);
+    }
+
     /**
      * 添加JWT拦截器
      */
@@ -57,9 +75,13 @@ public class WebMvcConfig implements WebMvcConfigurer {
         registry.addInterceptor(jwtInterceptor())
                 .addPathPatterns("/api/**")
                 .excludePathPatterns("/flow/**")
+                .excludePathPatterns("/api/v1/agent/**")
                 .excludePathPatterns("/api/v1/open_api/**")
                 .excludePathPatterns("/api/v1/config/get")
                 .excludePathPatterns("/api/v1/user/login")
                 .excludePathPatterns("/api/v1/captcha/**");
+
+        registry.addInterceptor(agentApiInterceptor)
+                .addPathPatterns("/api/v1/agent/**");
     }
 }
