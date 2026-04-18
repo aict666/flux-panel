@@ -14,6 +14,7 @@ import com.admin.service.AgentApiKeyService;
 import com.admin.service.AgentClientService;
 import com.alibaba.fastjson2.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.HandlerInterceptor;
 
@@ -23,6 +24,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+@Component
 public class AgentApiInterceptor implements HandlerInterceptor {
 
     private static final String START_TIME_ATTR = "agent_api_start_time";

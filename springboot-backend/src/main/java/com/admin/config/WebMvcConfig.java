@@ -2,9 +2,6 @@ package com.admin.config;
 
 import com.admin.common.interceptor.AgentApiInterceptor;
 import com.admin.common.interceptor.JwtInterceptor;
-import com.admin.service.AgentApiAuditLogService;
-import com.admin.service.AgentApiKeyService;
-import com.admin.service.AgentClientService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.cors.CorsConfiguration;
@@ -55,15 +52,6 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Bean
     public JwtInterceptor jwtInterceptor() {
         return new JwtInterceptor();
-    }
-
-    @Bean
-    public AgentApiInterceptor agentApiInterceptor(
-            AgentApiKeyService agentApiKeyService,
-            AgentClientService agentClientService,
-            AgentApiAuditLogService agentApiAuditLogService
-    ) {
-        return new AgentApiInterceptor(agentApiKeyService, agentClientService, agentApiAuditLogService);
     }
 
     /**
